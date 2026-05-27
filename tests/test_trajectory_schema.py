@@ -155,3 +155,51 @@ def test_step_object_constructs_directly() -> None:
     assert s.step == 3
     assert s.role == "assistant"
     assert s.step_label is None
+
+
+# --- task_prompt / task_metadata fields ---
+
+
+def test_task_prompt_field_present_and_defaults_none() -> None:
+    t = Trajectory(**_minimal_raw())
+    assert t.task_prompt is None
+    assert t.task_metadata == {}
+
+
+def test_task_prompt_round_trips() -> None:
+    raw = _minimal_raw()
+    raw["task_prompt"] = "Fix the pagination bug."
+    raw["task_metadata"] = {"difficulty": "medium"}
+    t = Trajectory(**raw)
+    assert t.task_prompt == "Fix the pagination bug."
+    assert t.task_metadata["difficulty"] == "medium"
+
+
+# --- outcome vs test_result consistency (model_validator) ---
+
+
+def test_outcome_matches_test_result_passed() -> None:
+    raw = _minimal_raw()
+    raw["outcome"] = 1
+    raw["test_result"] = {"passed": True, "command": "pytest", "exit_code": 0}
+    t = Trajectory(**raw)
+    assert t.outcome == 1
+    assert t.test_result.passed is True
+
+
+def test_outcome_disagrees_with_test_result_raises() -> None:
+    raw = _minimal_raw()
+    raw["outcome"] = 1
+    raw["test_result"] = {"passed": False, "command": "pytest", "exit_code": 1}
+    with pytest.raises(ValueError, match="disagrees with"):
+        Trajectory(**raw)
+
+
+def test_test_result_absent_allows_any_outcome() -> None:
+    """The consistency check only fires when test_result is present."""
+    raw = _minimal_raw()
+    raw["outcome"] = 0
+    # test_result not set
+    t = Trajectory(**raw)
+    assert t.outcome == 0
+    assert t.test_result is None

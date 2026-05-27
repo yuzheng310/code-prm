@@ -17,7 +17,7 @@ Schema design notes:
 """
 from __future__ import annotations
 from typing import Any, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TokenUsage(BaseModel):
@@ -81,6 +81,13 @@ class Trajectory(BaseModel):
     run_id: str | None = None
     rollout_id: int = Field(default=0, ge=0)
 
+    # --- task description (used by step labeler's judge prompt) ---
+    # Without this, the LLM judge sees only the tool trace and cannot tell
+    # whether the trajectory is solving the right problem. TS logger should
+    # populate this from SWE-bench `problem_statement` / BigCodeBench `prompt`.
+    task_prompt: str | None = None
+    task_metadata: dict[str, Any] = Field(default_factory=dict)
+
     # --- environment / replay (optional in Phase 1, required for real MC) ---
     repo: str | None = None
     base_commit: str | None = None
@@ -103,3 +110,16 @@ class Trajectory(BaseModel):
         if v not in (0, 1):
             raise ValueError(f"outcome must be 0 or 1, got {v}")
         return v
+
+    @model_validator(mode="after")
+    def outcome_matches_test_result(self) -> "Trajectory":
+        """If `test_result` is present, `outcome` must agree with `test_result.passed`."""
+        if self.test_result is not None:
+            expected = 1 if self.test_result.passed else 0
+            if self.outcome != expected:
+                raise ValueError(
+                    f"outcome ({self.outcome}) disagrees with "
+                    f"test_result.passed ({self.test_result.passed}); "
+                    "they must be consistent."
+                )
+        return self

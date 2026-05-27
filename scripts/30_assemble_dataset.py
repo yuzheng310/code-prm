@@ -24,13 +24,13 @@ from src.utils.jsonl_io import read_trajectories, write_trajectories  # noqa: E4
 
 
 def collect_all(input_dirs: list[Path]) -> list[Trajectory]:
-    """Read every *.jsonl under each input dir and concatenate."""
+    """Read every *.jsonl under each input dir (recursive) and concatenate."""
     all_trajs: list[Trajectory] = []
     for d in input_dirs:
         if not d.exists():
             print(f"  WARN: input dir {d} does not exist, skipping")
             continue
-        files = sorted(d.glob("*.jsonl"))
+        files = sorted(d.rglob("*.jsonl"))
         for f in files:
             n_before = len(all_trajs)
             all_trajs.extend(read_trajectories(f))

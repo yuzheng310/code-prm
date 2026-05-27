@@ -49,7 +49,7 @@ agentrl/
 ├── README.md                               # project root README (Task 1)
 ├── environment.yml                         # conda env spec (Task 2)
 ├── third_party/
-│   └── openr/                              # fork submodule (Task 3)
+│   └── openr/                              # OpenR submodule (kept as reference only, Task 3)
 ├── src/
 │   ├── __init__.py
 │   ├── collector/
@@ -57,32 +57,36 @@ agentrl/
 │   │   └── ts_logger_spec.md               # TS-side integration contract (Task 8)
 │   ├── labeler/
 │   │   ├── __init__.py
-│   │   ├── mc_labeler.py                   # MC rollout label generator (Task 16)
+│   │   ├── step_labeler.py                 # LLM-judge step labeler (Task 16; was mc_labeler)
+│   │   ├── label_all.py                    # batch labeling driver (Task 19)
 │   │   ├── anthropic_client.py             # rate-limited API wrapper (Task 15)
 │   │   └── trajectory_schema.py            # pydantic schemas (Task 8)
 │   ├── eval/
 │   │   ├── __init__.py
-│   │   └── swebench_runner.py              # SWE-bench task launcher (Task 10)
+│   │   ├── swebench_runner.py              # task loader + TS launcher (Task 10)
+│   │   └── collect_batch.py                # batched collection driver (Task 13)
 │   └── utils/
 │       ├── __init__.py
-│       ├── cost_tracker.py                 # token + $ tracking (Task 14)
+│       ├── cost_tracker.py                 # token + $ tracking (Task 12)
+│       ├── cost_aggregator.py              # real cost from token_usage (Task 12)
 │       └── jsonl_io.py                     # streaming read/write helpers (Task 8)
 ├── scripts/
-│   ├── 00_setup_lab_box.sh                 # 3090 box bootstrap (Task 4)
-│   ├── 01_train_openr_baseline.sh          # math PRM baseline (Task 6)
-│   ├── 02_eval_openr_baseline.sh           # baseline eval (Task 7)
-│   ├── 10_collect_trajectories.sh          # batched trajectory collection (Task 13)
-│   ├── 20_label_mc.sh                      # MC labeling driver (Task 20)
-│   └── 30_assemble_dataset.py              # train/val/test split (Task 23)
+│   ├── 00_setup_lab_box.sh                 # lab box bootstrap (Task 4)
+│   ├── 10_collect_trajectories.sh          # SWE-bench collection (Task 13)
+│   ├── 11_collect_bigcodebench.sh          # BigCodeBench collection (Task 14)
+│   ├── 20_label_steps.sh                   # LLM-judge step labeling driver (Task 19)
+│   └── 30_assemble_dataset.py              # train/val/test split (Task 20)
 ├── tests/
 │   ├── __init__.py
-│   ├── test_mc_labeler.py                  # unit tests for labeler (Task 17)
+│   ├── test_step_labeler.py                # unit tests for labeler (Task 17)
 │   ├── test_trajectory_schema.py           # schema validation tests (Task 8)
+│   ├── test_cost_tracker.py                # cost tracker tests (Task 12)
+│   ├── test_cost_aggregator.py             # cost aggregator tests (Task 12)
 │   └── fixtures/
 │       └── synthetic_trajectory.json       # tiny trajectory for tests (Task 17)
 ├── data/                                   # gitignored
-│   ├── raw/                                # raw collected trajectories
-│   ├── labeled/                            # post-MC-labeling
+│   ├── raw/                                # raw collected trajectories (flat per task_type)
+│   ├── labeled/                            # LLM-judge labeled
 │   └── code-trajectory-2.4k/               # final train/val/test
 └── docs/
     ├── superpowers/
@@ -90,7 +94,7 @@ agentrl/
     │   │   └── 2026-05-27-code-prm-design.md  # (already exists)
     │   └── plans/
     │       └── 2026-05-27-code-prm-phase1-foundation.md  # (this file)
-    └── phase1-report.md                    # phase 1 summary (Task 24)
+    └── phase1-report.md                    # phase 1 summary (Task 21)
 ```
 
 TS codeAgent files (path: user's existing TS repo, abbreviated as `$TS_REPO`):
@@ -602,6 +606,16 @@ git commit -m "exp: openr baseline eval (F1=<actual>)"
 
 ### Task 8: Define trajectory schema (Pydantic)
 
+> **⚠️ SUPERSEDED below.** Current schema lives at
+> `src/labeler/trajectory_schema.py`. It is RICHER than the original draft
+> shown in steps below — includes `TokenUsage`, `TestResult`, `run_id`,
+> `rollout_id`, `task_prompt`, `task_metadata`, `repo`, `base_commit`,
+> `final_diff`, `test_result`, `token_usage`, `label_method`, and uses
+> `step_label` (not `mc_label`) on the Step class. The TS contract at
+> `src/collector/ts_logger_spec.md` is also updated. DO NOT use the
+> example code blocks below to regenerate the schema — read the actual
+> committed source instead.
+
 **Files:**
 - Create: `src/labeler/trajectory_schema.py`
 - Create: `src/utils/jsonl_io.py`
@@ -925,7 +939,14 @@ git commit -m "feat: trajectory logger for Code-PRM data collection"
 
 ---
 
-### Task 10: Stand up SWE-bench Lite runner
+### Task 10: SWE-bench Lite + BigCodeBench task loader + TS launcher
+
+> **⚠️ SUPERSEDED below.** Current code lives at
+> `src/eval/swebench_runner.py`. Renamed from "runner" to honestly reflect
+> what it is: task loaders + TS launcher. Outcome attribution is by the
+> TS side (which runs the tests). Also handles task_id vs instance_id
+> across SWE-bench / BigCodeBench. DO NOT use the example code block below
+> verbatim — read the source.
 
 **Files:**
 - Create: `src/eval/swebench_runner.py`
@@ -1185,6 +1206,14 @@ git commit -m "feat: cost tracker with per-model pricing"
 
 ### Task 13: Batched trajectory collection (scale up to 300 SWE-bench tasks)
 
+> **⚠️ SUPERSEDED below.** Current code at `src/eval/collect_batch.py`.
+> Differences from the original draft:
+> - Output is FLAT (`$LOG_DIR/*.jsonl`), not nested `rollout_k/` subdirs
+> - Each invocation passes `CODE_PRM_ROLLOUT_ID` + `CODE_PRM_RUN_ID` env vars
+>   so the TS logger stamps `rollout_id` / `run_id` into the trajectory record
+> - `--budget_usd` is a SOFT pre-flight estimate; real cost is in
+>   `Trajectory.token_usage` aggregated via `src/utils/cost_aggregator.py`
+
 **Files:**
 - Create: `scripts/10_collect_trajectories.sh`
 
@@ -1306,6 +1335,10 @@ git commit -m "exp: collected ~1200 SWE-bench Lite trajectories"
 
 ### Task 14: Collect BigCodeBench-Hard trajectories
 
+> **⚠️ SUPERSEDED below.** Use `scripts/11_collect_bigcodebench.sh` (already
+> written). The `swebench_runner.py` correctly detects `task_id` vs
+> `instance_id` and emits `--task-type bigcodebench-hard` for BigCode tasks.
+
 - [ ] **Step 1: Install BigCodeBench**
 
 ```bash
@@ -1421,7 +1454,18 @@ git commit -m "feat: rate-limited anthropic client with retry"
 
 ---
 
-### Task 16: MC labeler core implementation
+### Task 16: Step labeler core implementation (was: "MC labeler")
+
+> **⚠️ RENAMED + SUPERSEDED below.** Module is now
+> `src/labeler/step_labeler.py` (was `mc_labeler.py`). It is an LLM-judge
+> surrogate, NOT Monte-Carlo rollout (see spec §5.3). Key behaviors:
+> - Field is `step_label` (not `mc_label`)
+> - Function `llm_judge_score_step` (not `mc_rollout_for_step`)
+> - Prompt INCLUDES `task_prompt` from the Trajectory (problem statement)
+> - `label_trajectory_simplified` accepts `only_tool_steps` flag to
+>   symmetrize labels across success / failure paths
+> - Output trajectories are stamped `label_method = "llm_judge"`
+> - `_parses_as_successful` uses line-anchored regex, not substring `in`
 
 **Files:**
 - Create: `src/labeler/mc_labeler.py`
@@ -1539,6 +1583,11 @@ git commit -m "feat: MC labeler (lightweight LLM-judge surrogate)"
 
 ### Task 17: Unit test the labeler on synthetic data
 
+> **⚠️ SUPERSEDED below.** Tests live at `tests/test_step_labeler.py` (was
+> `test_mc_labeler.py`). Now 13 tests (was 7) including coverage for the
+> task_prompt-augmented judge prompt, line-anchored regex parsing, and
+> the symmetric `only_tool_steps` flag in `label_trajectory_simplified`.
+
 **Files:**
 - Create: `tests/fixtures/synthetic_trajectory.json`
 - Create: `tests/test_mc_labeler.py`
@@ -1609,7 +1658,13 @@ git commit -m "test: MC labeler unit tests on synthetic data"
 
 ---
 
-### Task 18: Pilot MC labeling on 10 trajectories
+### Task 18: Pilot step labeling on 10 trajectories (was: "Pilot MC labeling")
+
+> **⚠️ TERMINOLOGY UPDATE.** Replace all references to "MC labeling" with
+> "step labeling (LLM-judge surrogate)" when reading the steps below.
+> The pilot still proceeds the same way — run on 10 trajectories,
+> inspect the `step_label` distribution. The distribution check criteria
+> in the original steps remain valid.
 
 - [ ] **Step 1: Run pilot labeling**
 
@@ -1682,7 +1737,12 @@ git commit -m "exp: pilot MC labeling distribution check"
 
 ---
 
-### Task 19: Full-scale MC labeling
+### Task 19: Full-scale step labeling (was: "Full-scale MC labeling")
+
+> **⚠️ SUPERSEDED below.** Use `scripts/20_label_steps.sh` (renamed from
+> `20_label_mc.sh`). The Python driver is `src/labeler/label_all.py` which
+> uses `rglob("*.jsonl")` so nested input layouts are also picked up;
+> output filenames flatten subpath with "__" to avoid collisions.
 
 **Files:**
 - Create: `scripts/20_label_mc.sh`
@@ -1790,6 +1850,11 @@ git commit -m "exp: full MC labeling pass (~$120, ~20k labels)"
 
 ### Task 20: Train/val/test dataset assembly
 
+> **⚠️ SUPERSEDED below.** `scripts/30_assemble_dataset.py` is already
+> committed and now uses `rglob("*.jsonl")` so nested input layouts are
+> handled. Just run the script — the original step-by-step instructions
+> below are fine in spirit but the file already exists.
+
 **Files:**
 - Create: `scripts/30_assemble_dataset.py`
 
@@ -1895,7 +1960,7 @@ git commit -m "feat: dataset assembly script (train/val/test split)"
 ## Status: COMPLETE
 
 ## Deliverables
-- OpenR baseline reproduced on PRM800K: F1 = <fill>
+- OpenR baseline reproduction: ~~SKIPPED~~ (see top revision log: paradigm mismatch)
 - Trajectory dataset: 2400 trajectories, ~24k step labels
 - Total cost: $<fill> (budget: $400)
 
@@ -1907,7 +1972,7 @@ git commit -m "feat: dataset assembly script (train/val/test split)"
 | test | <fill> | <fill> | <fill>% |
 
 ## MC Label Distribution
-- Mean mc_label: <fill>
+- Mean step_label: <fill>
 - Median: <fill>
 - {0, 0.25, 0.5, 0.75, 1.0} counts: <fill>
 
@@ -1944,10 +2009,10 @@ git push --tags
 
 Phase 1 is complete when ALL of these are true:
 
-- [ ] OpenR baseline trains & evals on lab box 3090, F1 ≥ 0.5 on PRM800K small subset
+- [x] ~~OpenR baseline trains & evals on lab box, F1 ≥ 0.5 on PRM800K~~ SKIPPED (see top revision log). Env validation served by `pytest tests/ -v` (27 tests) passing on lab box.
 - [ ] `data/code-trajectory-2.4k/{train,val,test}.jsonl` exist
 - [ ] Total trajectories ≥ 2000 (target 2400, allow some failures)
-- [ ] MC labels: ≥ 80% of tool-call steps have non-None `mc_label`
+- [ ] LLM-judge step labels: ≥ 80% of tool-call steps have non-None `step_label`, and `label_method == "llm_judge"` on every output trajectory
 - [ ] MC label distribution is non-degenerate (mean ∈ [0.2, 0.8], not all-0/all-1)
 - [ ] Total Phase 1 cost ≤ $500
 - [ ] All Python unit tests pass: `pytest tests/ -v`

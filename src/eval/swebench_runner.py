@@ -76,21 +76,38 @@ def run_task_with_codeagent(
         the jsonl, NOT in this return value.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # SWE-bench uses `instance_id`; BigCodeBench uses `task_id`.
+    if "instance_id" in task:
+        task_id = task["instance_id"]
+        task_type = "swe-bench-lite"
+    elif "task_id" in task:
+        task_id = task["task_id"]
+        task_type = "bigcodebench-hard"
+    else:
+        raise KeyError(
+            f"Task dict has neither 'instance_id' nor 'task_id'. Keys: {list(task.keys())}"
+        )
+
     env = os.environ.copy()
     env["CODE_PRM_LOG_DIR"] = str(log_dir)
-    env["SWEBENCH_TASK_JSON"] = json.dumps(task)
+    env["CODE_PRM_TASK_TYPE"] = task_type
+    # Forward the full task payload so the TS side can extract problem statement etc.
+    env["CODE_PRM_TASK_JSON"] = json.dumps(task)
+    # Legacy alias — to be removed once TS code migrates to CODE_PRM_TASK_JSON.
+    env["SWEBENCH_TASK_JSON"] = env["CODE_PRM_TASK_JSON"]
     if extra_env:
         env.update(extra_env)
 
     # TODO(user): Adjust this command to match your actual codeAgent CLI.
-    # The placeholder assumes: `node <ts_repo>/dist/cli.js run --task-id X --task-type swe-bench-lite`
+    # The placeholder assumes: `node <ts_repo>/dist/cli.js run --task-id X --task-type <T>`
     # If your CLI differs, change the argv here.
     cmd = [
         "node",
         str(ts_repo / "dist" / "cli.js"),
         "run",
-        "--task-id", task["instance_id"],
-        "--task-type", "swe-bench-lite",
+        "--task-id", task_id,
+        "--task-type", task_type,
     ]
 
     result = subprocess.run(

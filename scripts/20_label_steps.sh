@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run MC labeling on both swebench-lite and bigcodebench-hard collected data.
+# Run LLM-judge step labeling on both swebench-lite and bigcodebench-hard
+# collected data. (This is a weak-supervision surrogate, NOT Monte-Carlo
+# rollout — see src/labeler/step_labeler.py docstring and spec §5.3.)
 # Wall-clock: ~10-15 hours. Estimated cost: ~$120-140 (Haiku).
 # Run from project root, inside tmux on the lab box.
 set -euo pipefail

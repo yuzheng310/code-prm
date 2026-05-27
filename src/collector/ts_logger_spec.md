@@ -16,7 +16,9 @@ Additional env vars from the Python collector (`src/eval/collect_batch.py`):
 | `CODE_PRM_LOG_DIR` | Directory to write jsonl into | (no logging) |
 | `CODE_PRM_ROLLOUT_ID` | Stamp `rollout_id` on trajectory | `0` |
 | `CODE_PRM_RUN_ID` | Stamp `run_id` on trajectory | TS generates UUID |
-| `SWEBENCH_TASK_JSON` | Full task payload from HF dataset | — |
+| `CODE_PRM_TASK_JSON` | Full task payload from HF dataset (preferred) | — |
+| `CODE_PRM_TASK_TYPE` | Task set name ("swe-bench-lite" / "bigcodebench-hard") | — |
+| `SWEBENCH_TASK_JSON` | Legacy alias of `CODE_PRM_TASK_JSON` (still set, will be removed) | — |
 
 ## File location
 
@@ -64,6 +66,10 @@ interface Trajectory {
   run_id?: string;                 // uuid v4 per agent run
   rollout_id: number;              // from CODE_PRM_ROLLOUT_ID, default 0
 
+  // task description (REQUIRED by step labeler's judge prompt)
+  task_prompt?: string;            // problem_statement (SWE) or prompt (BigCode)
+  task_metadata?: Record<string, any>;  // any other benchmark fields you want
+
   // environment / replay (recommended for future real MC; optional now)
   repo?: string | null;            // e.g. "django/django"
   base_commit?: string | null;     // git SHA before agent ran
@@ -95,12 +101,20 @@ These cannot default sensibly and must be in the output:
 ## Strongly recommended fields
 
 The pipeline still works without these, but the analysis quality drops:
+- **`task_prompt`** — REQUIRED for meaningful step labeling. Extract from
+  `JSON.parse(process.env.CODE_PRM_TASK_JSON)`:
+  - SWE-bench: `task.problem_statement`
+  - BigCodeBench: `task.prompt` (or `task.instruct_prompt`)
+  Without this the LLM judge has no idea what task is being solved.
 - **`token_usage`** — without it, cost aggregation is impossible; Python
   side has only an estimate
 - **`run_id`** — set to `process.env.CODE_PRM_RUN_ID || crypto.randomUUID()`
 - **`rollout_id`** — set to `parseInt(process.env.CODE_PRM_ROLLOUT_ID || "0", 10)`
 - **`test_result`** — distinguishes test failure modes (compile error vs
-  flaky vs real wrong-answer)
+  flaky vs real wrong-answer). MUST be consistent with `outcome`:
+  if `test_result.passed === true` then `outcome === 1`, else 0.
+  Schema enforces this; emitting mismatched values will fail Pydantic
+  validation downstream.
 
 ## Recommended for Phase 2 (real MC rollout upgrade path)
 
@@ -110,13 +124,17 @@ The pipeline still works without these, but the analysis quality drops:
 ## Integration hook in codeAgent
 
 1. At agent start, allocate `steps: Step[] = []` and a `stepIdx = 0`.
-2. Capture initial `base_commit` (git SHA of the repo before the agent acts).
-3. After each tool execution, push `{step: stepIdx++, role: "assistant", thought, tool, tool_args, tool_result}`.
-4. Track cumulative API token usage from each Anthropic response, summing into a `TokenUsage` accumulator.
-5. On task completion:
+2. Parse `CODE_PRM_TASK_JSON` to extract:
+   - `task_prompt` (problem_statement / prompt)
+   - `task_metadata` (any other benchmark fields you care about)
+3. Capture initial `base_commit` (git SHA of the repo before the agent acts).
+4. After each tool execution, push `{step: stepIdx++, role: "assistant", thought, tool, tool_args, tool_result}`.
+5. Track cumulative API token usage from each Anthropic response, summing into a `TokenUsage` accumulator.
+6. On task completion:
    - Run the task's test suite
    - Capture `outcome` (0/1), `test_result` (richer), `final_diff` (git diff vs base_commit)
-6. Assemble the Trajectory and append as a single jsonl line.
+   - Verify `test_result.passed === !!outcome` before emitting (consistency).
+7. Assemble the Trajectory and append as a single jsonl line.
 
 ## Truncation rules
 
