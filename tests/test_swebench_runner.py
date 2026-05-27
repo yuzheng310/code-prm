@@ -31,10 +31,10 @@ def test_uses_instance_id_for_swebench(tmp_path: Path, monkeypatch) -> None:
         return MagicMock(returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    ok = swebench_runner.run_task_with_codeagent(
+    status = swebench_runner.run_task_with_codeagent(
         _swe_task(), tmp_path / "ts_repo", tmp_path / "logs",
     )
-    assert ok is True
+    assert status == "ok"
     assert "--task-id" in captured["cmd"]
     idx = captured["cmd"].index("--task-id")
     assert captured["cmd"][idx + 1] == "django__django-1"
@@ -51,14 +51,22 @@ def test_uses_task_id_for_bigcodebench(tmp_path: Path, monkeypatch) -> None:
         return MagicMock(returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    ok = swebench_runner.run_task_with_codeagent(
+    status = swebench_runner.run_task_with_codeagent(
         _bigcode_task(), tmp_path / "ts_repo", tmp_path / "logs",
     )
-    assert ok is True
+    assert status == "ok"
     idx = captured["cmd"].index("--task-id")
     assert captured["cmd"][idx + 1] == "BigCodeBench/0"
     type_idx = captured["cmd"].index("--task-type")
     assert captured["cmd"][type_idx + 1] == "bigcodebench-hard"
+
+
+def test_returns_failed_on_nonzero_exit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: MagicMock(returncode=2))
+    status = swebench_runner.run_task_with_codeagent(
+        _swe_task(), tmp_path / "ts_repo", tmp_path / "logs",
+    )
+    assert status == "failed"
 
 
 def test_raises_on_task_with_neither_id_field(tmp_path: Path, monkeypatch) -> None:
@@ -69,28 +77,40 @@ def test_raises_on_task_with_neither_id_field(tmp_path: Path, monkeypatch) -> No
         )
 
 
-def test_timeout_returns_false_instead_of_raising(tmp_path: Path, monkeypatch) -> None:
-    """One slow task must NOT crash the whole batch."""
+def test_timeout_returns_timeout_status(tmp_path: Path, monkeypatch) -> None:
+    """One slow task must report 'timeout', NOT crash the batch."""
     def raise_timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 0))
 
     monkeypatch.setattr(subprocess, "run", raise_timeout)
-    ok = swebench_runner.run_task_with_codeagent(
+    status = swebench_runner.run_task_with_codeagent(
         _swe_task(), tmp_path / "ts_repo", tmp_path / "logs", timeout_sec=1,
     )
-    assert ok is False  # no exception propagated
+    assert status == "timeout"
 
 
-def test_filenotfound_returns_false(tmp_path: Path, monkeypatch) -> None:
-    """Missing `node` binary should be reported as failure, not crash."""
+def test_filenotfound_returns_launch_error(tmp_path: Path, monkeypatch) -> None:
+    """Missing `node` binary should be reported as launch_error (config bug)."""
     def raise_fnf(*args, **kwargs):
         raise FileNotFoundError("node not found")
 
     monkeypatch.setattr(subprocess, "run", raise_fnf)
-    ok = swebench_runner.run_task_with_codeagent(
+    status = swebench_runner.run_task_with_codeagent(
         _swe_task(), tmp_path / "ts_repo", tmp_path / "logs",
     )
-    assert ok is False
+    assert status == "launch_error"
+
+
+def test_permission_error_returns_launch_error(tmp_path: Path, monkeypatch) -> None:
+    """Permission errors are config bugs, not transient task failures."""
+    def raise_perm(*args, **kwargs):
+        raise PermissionError("can't exec node")
+
+    monkeypatch.setattr(subprocess, "run", raise_perm)
+    status = swebench_runner.run_task_with_codeagent(
+        _swe_task(), tmp_path / "ts_repo", tmp_path / "logs",
+    )
+    assert status == "launch_error"
 
 
 def test_extra_env_forwarded(tmp_path: Path, monkeypatch) -> None:

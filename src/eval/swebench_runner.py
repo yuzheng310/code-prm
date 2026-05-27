@@ -7,7 +7,7 @@ This module is NOT a full SWE-bench harness. It does TWO things:
    passing env vars so the TS side can:
        - emit a trajectory jsonl line (CODE_PRM_LOG_DIR)
        - tag the trajectory with rollout_id / run_id (CODE_PRM_*)
-       - receive the task payload (SWEBENCH_TASK_JSON)
+       - receive the task payload (CODE_PRM_TASK_JSON)
 
 OUTCOME ATTRIBUTION (read this carefully):
    The pass/fail "outcome" stored in the trajectory is decided by the TS
@@ -15,8 +15,8 @@ OUTCOME ATTRIBUTION (read this carefully):
    running the task's tests (e.g. via SWE-bench docker harness or pytest
    directly) and writing the `outcome` int into the jsonl.
 
-   This module only reports whether the subprocess exited non-zero
-   (process-level success), which is distinct from agent-task success.
+   This module only reports a process-level status (`TaskRunStatus`)
+   which is distinct from agent-task success.
 
 For a full SWE-bench eval with docker grading, see Phase 3 work.
 """
@@ -25,7 +25,17 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+
+# Process-level launch outcome. NOT the same as agent-task pass/fail.
+# - "ok"           — subprocess exited 0 (TS side ran to completion)
+# - "failed"       — subprocess exited non-zero (TS side error)
+# - "timeout"      — exceeded timeout_sec; subprocess was killed
+# - "launch_error" — node binary missing / OS-level launch failure;
+#                    this is a CONFIG bug, not a task failure, and
+#                    callers should usually abort the batch.
+TaskRunStatus = Literal["ok", "failed", "timeout", "launch_error"]
 
 
 def load_swebench_lite() -> list[dict[str, Any]]:
@@ -57,7 +67,7 @@ def run_task_with_codeagent(
     log_dir: Path,
     timeout_sec: int = 600,
     extra_env: dict[str, str] | None = None,
-) -> bool:
+) -> TaskRunStatus:
     """Run the TS codeAgent on one task as a subprocess.
 
     Side effect: the TS side appends a trajectory line to
@@ -72,10 +82,10 @@ def run_task_with_codeagent(
             forwarded to the TS subprocess.
 
     Returns:
-        True iff the subprocess exited 0. The agent-level pass/fail is in
-        the jsonl, NOT in this return value. Returns False (instead of
-        raising) on subprocess timeout — callers in batch mode should NOT
-        crash the whole batch on one slow task.
+        One of `TaskRunStatus`. The agent-level pass/fail is in the jsonl,
+        NOT in this return. "timeout" is recoverable per task; "launch_error"
+        signals a config bug that the caller should treat as a hard stop
+        (e.g. `node` binary missing or TS repo not built).
     """
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -117,12 +127,13 @@ def run_task_with_codeagent(
             cmd, env=env, capture_output=True, text=True, timeout=timeout_sec,
         )
     except subprocess.TimeoutExpired:
-        # Don't crash the batch; just report process-level failure.
-        return False
-    except (FileNotFoundError, OSError):
-        # node binary missing, or other OS-level launch failure.
-        return False
-    return result.returncode == 0
+        # Don't crash the batch; per-task timeout is recoverable.
+        return "timeout"
+    except (FileNotFoundError, PermissionError, OSError):
+        # `node` binary missing, or other OS-level launch failure.
+        # This is a CONFIG bug — caller should abort the batch, not paper over it.
+        return "launch_error"
+    return "ok" if result.returncode == 0 else "failed"
 
 
 if __name__ == "__main__":

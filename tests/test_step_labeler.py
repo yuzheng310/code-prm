@@ -205,6 +205,61 @@ def test_label_file_outcome_zero_uses_simplification_method(tmp_path) -> None:
     assert client.calls == 0
 
 
+class _ExplodingClient:
+    """Client that raises on the Nth call. Used to test atomic-write rollback."""
+    def __init__(self, explode_after: int) -> None:
+        self._n = 0
+        self._explode_after = explode_after
+
+    def complete(self, messages, max_tokens=2048, temperature=0.9):
+        self._n += 1
+        if self._n > self._explode_after:
+            raise RuntimeError("simulated API failure")
+        return "OUTCOME: PASS", 0, 0
+
+
+def test_label_file_atomic_on_failure_leaves_no_output(tmp_path) -> None:
+    """If labeling raises mid-stream, output file must NOT exist (no partial)."""
+    from src.labeler.step_labeler import label_file
+    from src.utils.jsonl_io import write_trajectories
+
+    src = tmp_path / "in.jsonl"
+    dst = tmp_path / "out.jsonl"
+    # Two outcome=1 trajectories; client will explode mid-way.
+    t1 = _load_fixture()
+    t2 = _load_fixture()
+    t2.task_id = "second-traj"
+    write_trajectories(src, [t1, t2])
+
+    client = _ExplodingClient(explode_after=2)  # let some calls succeed first
+    with pytest.raises(RuntimeError, match="simulated"):
+        label_file(src, dst, client, K=4)
+
+    assert not dst.exists(), "Atomic-write contract violated: partial output present"
+    # The .tmp file should also be cleaned up
+    assert not (tmp_path / "out.jsonl.tmp").exists()
+
+
+def test_label_file_atomic_success_replaces_existing_output(tmp_path) -> None:
+    """On success, existing dst is replaced atomically (no .tmp leftover)."""
+    from src.labeler.step_labeler import label_file
+    from src.utils.jsonl_io import write_trajectories
+
+    src = tmp_path / "in.jsonl"
+    dst = tmp_path / "out.jsonl"
+    # Pre-populate dst with garbage that should get replaced
+    dst.write_text("OLD GARBAGE\n")
+    write_trajectories(src, [_load_fixture()])
+
+    client = _FakeClient(response_text="OUTCOME: PASS")
+    label_file(src, dst, client, K=2)
+
+    content = dst.read_text()
+    assert "OLD GARBAGE" not in content
+    assert "synth-001" in content
+    assert not (tmp_path / "out.jsonl.tmp").exists()
+
+
 def test_label_file_mixed_outcomes_stamp_correctly(tmp_path) -> None:
     """A file with both outcome=0 and outcome=1 should stamp each correctly."""
     from src.labeler.step_labeler import label_file

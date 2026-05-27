@@ -43,6 +43,9 @@ class TestResult(BaseModel):
     Richer than `Trajectory.outcome` (which is just 0/1). Useful for analyzing
     flaky tests, distinguishing failure modes, and debugging label drift.
     """
+    # Tell pytest this is NOT a test class (its name happens to start with "Test").
+    __test__ = False
+
     passed: bool
     command: str = ""
     exit_code: int = 0

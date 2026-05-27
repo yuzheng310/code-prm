@@ -12,8 +12,8 @@ estimate, not a hard guarantee.
 
 OUTPUT LAYOUT: All rollouts of all tasks write to a single flat directory
 `--log_dir`. The TS side receives `CODE_PRM_ROLLOUT_ID=k` per invocation
-and stamps the trajectory record's `rollout_id`. Downstream code can read
-the entire dataset via `glob("*.jsonl")` without recursing.
+and stamps the trajectory record's `rollout_id`. Downstream code uses
+`rglob("*.jsonl")` (robust to any future nested layouts).
 """
 from __future__ import annotations
 import argparse
@@ -96,6 +96,7 @@ async def collect(
     budget_usd: float,
     policy_model: str = "claude-sonnet-4-5",
     timeout_sec: int = 600,
+    limit: int | None = None,
 ) -> tuple[CostTracker, CollectionStats]:
     """Drive end-to-end collection. Returns (tracker, stats).
 
@@ -107,7 +108,24 @@ async def collect(
     tracker = CostTracker(budget_usd=budget_usd)
     stats = CollectionStats()
     tasks = _load_tasks(task_set)
+    if limit is not None:
+        tasks = tasks[:limit]
     ts_repo = Path(os.environ["TS_REPO_PATH"])
+
+    # --- Preflight: catch config errors BEFORE wasting money ---
+    if not ts_repo.is_dir():
+        raise RuntimeError(
+            f"TS_REPO_PATH does not exist or is not a directory: {ts_repo}. "
+            "Check your .env / shell env."
+        )
+    cli_js = ts_repo / "dist" / "cli.js"
+    if not cli_js.exists():
+        raise RuntimeError(
+            f"TS codeAgent CLI not found at {cli_js}. Did you run the TS "
+            "build step in your codeAgent repo? "
+            "If your CLI lives elsewhere, edit src/eval/swebench_runner.py "
+            "`run_task_with_codeagent` to point to it."
+        )
     log_dir.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(concurrency)
     total_runs = len(tasks) * num_rollouts
@@ -117,8 +135,14 @@ async def collect(
     print(f"Per-task timeout: {timeout_sec}s, Output dir (flat): {log_dir}")
     print("NOTE: real cost will be in trajectory token_usage; aggregate afterward.")
 
+    # Sentinel that, once set, makes remaining rollouts skip cheaply.
+    abort_flag = {"set": False}
+
     async def one_run(task: dict[str, Any], k: int) -> None:
         async with sem:
+            if abort_flag["set"]:
+                stats.add_skipped()
+                return
             if tracker.over_budget():
                 stats.add_skipped()
                 return
@@ -128,11 +152,8 @@ async def collect(
                 "CODE_PRM_RUN_ID": run_id,
             }
             loop = asyncio.get_running_loop()
-            # run_task_with_codeagent already swallows TimeoutExpired and
-            # returns False. Anything else raised here is a true crash.
-            t0 = time.monotonic()
             try:
-                ok = await loop.run_in_executor(
+                status = await loop.run_in_executor(
                     None,
                     run_task_with_codeagent,
                     task,
@@ -142,18 +163,26 @@ async def collect(
                     extra_env,
                 )
             except Exception as exc:  # noqa: BLE001 — log and continue
-                elapsed = time.monotonic() - t0
                 print(f"  [crash] task={task.get('instance_id', task.get('task_id', '?'))} "
-                      f"rollout={k} elapsed={elapsed:.1f}s err={exc!r}")
+                      f"rollout={k} err={exc!r}")
                 stats.add_crash()
                 return
 
-            elapsed = time.monotonic() - t0
-            if ok:
+            if status == "ok":
                 stats.add_success()
-            elif elapsed >= timeout_sec - 1.0:
+            elif status == "timeout":
                 stats.add_timeout()
-            else:
+            elif status == "launch_error":
+                # Config bug. Don't burn money on remaining tasks.
+                print(
+                    f"  [launch_error] task={task.get('instance_id', '?')} "
+                    f"rollout={k}: subprocess failed to launch. "
+                    "ABORTING batch — check `node` is installed and TS repo built."
+                )
+                stats.add_failure()
+                abort_flag["set"] = True
+                return
+            else:  # "failed"
                 stats.add_failure()
 
             # Pessimistic estimate; real cost is in trajectory.token_usage.
@@ -201,6 +230,14 @@ def main() -> None:
     p.add_argument("--log_dir", type=Path, required=True)
     p.add_argument("--budget_usd", type=float, required=True)
     p.add_argument("--policy_model", default="claude-sonnet-4-5")
+    p.add_argument(
+        "--limit", type=int, default=None,
+        help="Cap the number of tasks (after dataset load). Useful for pilots.",
+    )
+    p.add_argument(
+        "--timeout_sec", type=int, default=600,
+        help="Per-task subprocess timeout (default 10 min).",
+    )
     args = p.parse_args()
 
     asyncio.run(
@@ -211,6 +248,8 @@ def main() -> None:
             log_dir=args.log_dir,
             budget_usd=args.budget_usd,
             policy_model=args.policy_model,
+            timeout_sec=args.timeout_sec,
+            limit=args.limit,
         )
     )
 

@@ -65,6 +65,7 @@ agentrl/
 │       └── cost_aggregator.py              # real-cost summary from token_usage (Task 12)
 ├── scripts/
 │   ├── 00_setup_lab_box.sh                 # any-NVIDIA-GPU bootstrap (Task 4)
+│   ├── 05_collect_pilot.sh                 # 10-task pilot (Task 11)
 │   ├── 10_collect_trajectories.sh          # SWE-bench Lite collection (Task 13)
 │   ├── 11_collect_bigcodebench.sh          # BigCodeBench collection (Task 14)
 │   ├── 20_label_steps.sh                   # LLM-judge labeling (Task 19)
@@ -139,18 +140,22 @@ Each task: ✅ committed / ⏳ pending external action / ⚠️ blocked-on-user.
    5. git push your TS changes; clone TS repo onto lab box
 [on Lab Box, in tmux]  ↓
    6. export TS_REPO_PATH=<...>; export ANTHROPIC_API_KEY=<...>
-   7. Pilot:   bash scripts/10_collect_trajectories.sh  (10 tasks first)
-   8. Inspect data/raw/swebench-lite/*.jsonl  + token_usage          (Task 11)
-   9. Pilot:   python -m src.labeler.label_all --input_dir data/raw/swebench-lite \
-                  --output_dir data/labeled/pilot --budget_usd 5 --K 4
-  10. Inspect step_label distribution; commit pilot summary          (Task 18)
-  11. Full:   bash scripts/10_collect_trajectories.sh                (Task 13)
-  12. Full:   bash scripts/11_collect_bigcodebench.sh                (Task 14)
-  13. Aggregate real cost:  python -m src.utils.cost_aggregator --dir data/raw
-  14. Full:   bash scripts/20_label_steps.sh                         (Task 19)
-  15. Assemble: python scripts/30_assemble_dataset.py                (Task 20)
-  16. Fill in docs/phase1-report.md with real numbers                (Task 21)
-  17. Tag: git tag phase1-complete && git push --tags
+   7. Pilot collection:  bash scripts/05_collect_pilot.sh            (Task 11)
+                          # 10 tasks × 1 rollout, budget $10
+   8. Inspect data/raw/pilot/*.jsonl: outcome distribution,
+      task_prompt populated, token_usage populated                   (Task 11)
+   9. Pilot real-cost check:  python -m src.utils.cost_aggregator --dir data/raw/pilot
+  10. Pilot labeling:  python -m src.labeler.label_all \
+        --input_dir data/raw/pilot --output_dir data/labeled/pilot \
+        --budget_usd 5 --K 4                                         (Task 18)
+  11. Inspect step_label distribution; commit pilot summary
+  12. Full SWE:        bash scripts/10_collect_trajectories.sh       (Task 13)
+  13. Full BigCode:    bash scripts/11_collect_bigcodebench.sh       (Task 14)
+  14. Real cost:       python -m src.utils.cost_aggregator --dir data/raw
+  15. Full labeling:   bash scripts/20_label_steps.sh                (Task 19)
+  16. Assemble:        python scripts/30_assemble_dataset.py         (Task 20)
+  17. Fill in docs/phase1-report.md with real numbers                (Task 21)
+  18. Tag:             git tag phase1-complete && git push --tags
 ```
 
 ---
@@ -166,6 +171,7 @@ lab box, not estimated.
 - [ ] ≥ 80% of tool-call steps in outcome=1 trajectories have non-None `step_label`
 - [ ] On outcome=1 trajectories: mean `step_label` ∈ [0.2, 0.8] (non-degenerate)
 - [ ] Every labeled trajectory has `label_method` set to either `"llm_judge"` or `"outcome_zero_simplification"`
+- [ ] **≥ 95% of outcome=1 trajectories have non-empty `task_prompt`** (without this the LLM judge is near-random)
 - [ ] ≥ 80% of trajectories have `token_usage` populated (real cost coverage)
 - [ ] Real cost (per `cost_aggregator`) ≤ $500
 - [ ] `docs/phase1-report.md` filled in with actual numbers

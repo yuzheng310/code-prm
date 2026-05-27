@@ -5,9 +5,12 @@ Wraps `anthropic.Anthropic` with:
 - Hard stop when the shared CostTracker exceeds budget
 - Token usage automatically reported to the tracker
 
-Designed for use by both:
-- The trajectory collector (Sonnet, generating rollouts)
-- The MC labeler (Haiku, scoring partial trajectories)
+Designed for use by:
+- The step labeler (Haiku by default, LLM-judge surrogate scoring partial
+  trajectories). This is the primary in-process Anthropic consumer.
+- Any future in-Python rollout code (e.g. real MC rollout in Phase 2);
+  the trajectory collector itself subprocesses to the TS codeAgent so
+  doesn't use this client directly.
 
 Different instances can wrap different models; the CostTracker is shared.
 """

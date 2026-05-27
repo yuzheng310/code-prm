@@ -159,29 +159,46 @@ def label_file(
 ) -> None:
     """Label every trajectory in `input_path` jsonl, write to `output_path` jsonl.
 
-    Stamps `label_method = "llm_judge"` on every output trajectory for honesty.
+    Stamps `label_method` per trajectory:
+    - outcome=1 path  -> "llm_judge"          (real judge calls made)
+    - outcome=0 path  -> "outcome_zero_simplification"
+
+    Atomic write: writes to a `.tmp` sibling and replaces on success. If
+    ANY exception is raised mid-stream (API error, budget exceeded, schema
+    error), the `.tmp` is removed and `output_path` is left unchanged.
+    Downstream readers (label_all, assembly) thus never see partial files.
 
     Args:
         input_path: Source jsonl of unlabeled trajectories.
-        output_path: Destination jsonl. Overwrites if it already exists.
+        output_path: Destination jsonl. Overwrites atomically on success.
         client: Rate-limited client (typically wrapping Haiku for cost).
         K: Number of judge calls per tool step.
         only_tool_steps: If True, skip pure-thought steps (tool is None) in
             BOTH success and failure paths. They keep step_label = None.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists():
-        output_path.unlink()
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
 
-    for traj in read_trajectories(input_path):
-        if traj.outcome == 0:
-            label_trajectory_simplified(traj, only_tool_steps=only_tool_steps)
-            # Be precise: outcome=0 path did NOT invoke the judge.
-            traj.label_method = "outcome_zero_simplification"
-        else:
-            for i, step in enumerate(traj.trajectory):
-                if only_tool_steps and step.tool is None:
-                    continue
-                step.step_label = llm_judge_score_step(traj, i, client, K=K)
-            traj.label_method = "llm_judge"
-        append_trajectory(output_path, traj)
+    try:
+        for traj in read_trajectories(input_path):
+            if traj.outcome == 0:
+                label_trajectory_simplified(traj, only_tool_steps=only_tool_steps)
+                traj.label_method = "outcome_zero_simplification"
+            else:
+                for i, step in enumerate(traj.trajectory):
+                    if only_tool_steps and step.tool is None:
+                        continue
+                    step.step_label = llm_judge_score_step(traj, i, client, K=K)
+                traj.label_method = "llm_judge"
+            append_trajectory(tmp_path, traj)
+    except BaseException:
+        # Includes BudgetExceededError, KeyboardInterrupt, etc.
+        # Drop the partial file so it never leaks into the dataset.
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    # Atomic rename: either output_path is the new complete file, or
+    # output_path is unchanged (we never write a partial output_path).
+    tmp_path.replace(output_path)
