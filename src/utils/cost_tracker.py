@@ -1,7 +1,16 @@
-"""Tracks token spend across Anthropic API calls.
+"""Tracks token spend across Anthropic API calls (in-process accumulator).
 
-Used by both the trajectory collector (Sonnet rollouts) and the MC labeler
-(Haiku rollouts) to enforce a global budget cap.
+Two consumers:
+- The trajectory collector (`src.eval.collect_batch`) uses it as a SOFT
+  pre-flight estimate — Python doesn't see real TS-side API usage, so this
+  is a pessimistic guess. Real cost lives in `Trajectory.token_usage` and
+  is aggregated post-hoc via `src.utils.cost_aggregator`.
+- The step labeler (`src.labeler.step_labeler`) uses it as a HARD cap on
+  the LLM-judge Haiku calls it makes itself — those tokens flow back
+  through `RateLimitedClient` so the count IS accurate for this consumer.
+
+So: HARD cap for step labeling (in-process Anthropic calls), SOFT estimate
+for trajectory collection (subprocess-isolated TS-side calls).
 
 Pricing constants are USD per 1M tokens. Update them if Anthropic's
 pricing changes — see https://www.anthropic.com/pricing.

@@ -203,3 +203,54 @@ def test_test_result_absent_allows_any_outcome() -> None:
     t = Trajectory(**raw)
     assert t.outcome == 0
     assert t.test_result is None
+
+
+# --- TokenUsage and TestResult non-negative constraints ---
+
+
+def test_token_usage_rejects_negative_input_tokens() -> None:
+    raw = _minimal_raw()
+    raw["token_usage"] = {
+        "input_tokens": -100, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_creation_tokens": 0, "cost_usd": 0.0,
+    }
+    with pytest.raises(ValueError):
+        Trajectory(**raw)
+
+
+def test_token_usage_rejects_negative_cost() -> None:
+    raw = _minimal_raw()
+    raw["token_usage"] = {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_creation_tokens": 0, "cost_usd": -0.01,
+    }
+    with pytest.raises(ValueError):
+        Trajectory(**raw)
+
+
+def test_test_result_rejects_negative_duration() -> None:
+    raw = _minimal_raw()
+    raw["test_result"] = {
+        "passed": True, "command": "pytest", "exit_code": 0,
+        "duration_sec": -1.0,
+    }
+    with pytest.raises(ValueError):
+        Trajectory(**raw)
+
+
+# --- label_method distinguishes outcome_zero_simplification from llm_judge ---
+
+
+def test_label_method_accepts_outcome_zero_simplification() -> None:
+    raw = _minimal_raw()
+    raw["outcome"] = 0
+    raw["label_method"] = "outcome_zero_simplification"
+    t = Trajectory(**raw)
+    assert t.label_method == "outcome_zero_simplification"
+
+
+def test_label_method_accepts_mc_rollout() -> None:
+    raw = _minimal_raw()
+    raw["label_method"] = "mc_rollout"
+    t = Trajectory(**raw)
+    assert t.label_method == "mc_rollout"

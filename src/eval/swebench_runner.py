@@ -73,7 +73,9 @@ def run_task_with_codeagent(
 
     Returns:
         True iff the subprocess exited 0. The agent-level pass/fail is in
-        the jsonl, NOT in this return value.
+        the jsonl, NOT in this return value. Returns False (instead of
+        raising) on subprocess timeout — callers in batch mode should NOT
+        crash the whole batch on one slow task.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,9 +112,16 @@ def run_task_with_codeagent(
         "--task-type", task_type,
     ]
 
-    result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=timeout_sec,
-    )
+    try:
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        # Don't crash the batch; just report process-level failure.
+        return False
+    except (FileNotFoundError, OSError):
+        # node binary missing, or other OS-level launch failure.
+        return False
     return result.returncode == 0
 
 

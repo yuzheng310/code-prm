@@ -25,12 +25,16 @@ class TokenUsage(BaseModel):
 
     Filled by the TS codeAgent from the Anthropic API response. Allows the
     Python side to aggregate real cost rather than estimating from step counts.
+
+    All fields are non-negative — pydantic will reject malformed entries
+    (e.g. a TS bug that writes -1) so they don't silently pollute the
+    cost report.
     """
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_creation_tokens: int = 0
-    cost_usd: float = 0.0
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_creation_tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0.0)
 
 
 class TestResult(BaseModel):
@@ -44,7 +48,7 @@ class TestResult(BaseModel):
     exit_code: int = 0
     stdout_tail: str = ""
     stderr_tail: str = ""
-    duration_sec: float | None = None
+    duration_sec: float | None = Field(default=None, ge=0.0)
 
 
 class Step(BaseModel):
@@ -102,7 +106,16 @@ class Trajectory(BaseModel):
     policy_model: str
     timestamp: str
     token_usage: TokenUsage | None = None
-    label_method: Literal["llm_judge", "mc_rollout", "ground_truth"] | None = None
+    # outcome=1 path with judge calls => "llm_judge"
+    # outcome=0 path with simplification (all tool steps = 0) => "outcome_zero_simplification"
+    # Future Phase 2 real MC => "mc_rollout"
+    # Hand-curated reference labels => "ground_truth"
+    label_method: Literal[
+        "llm_judge",
+        "outcome_zero_simplification",
+        "mc_rollout",
+        "ground_truth",
+    ] | None = None
 
     @field_validator("outcome")
     @classmethod

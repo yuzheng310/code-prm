@@ -176,10 +176,12 @@ def label_file(
     for traj in read_trajectories(input_path):
         if traj.outcome == 0:
             label_trajectory_simplified(traj, only_tool_steps=only_tool_steps)
+            # Be precise: outcome=0 path did NOT invoke the judge.
+            traj.label_method = "outcome_zero_simplification"
         else:
             for i, step in enumerate(traj.trajectory):
                 if only_tool_steps and step.tool is None:
                     continue
                 step.step_label = llm_judge_score_step(traj, i, client, K=K)
-        traj.label_method = "llm_judge"
+            traj.label_method = "llm_judge"
         append_trajectory(output_path, traj)

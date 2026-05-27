@@ -144,3 +144,84 @@ def test_does_NOT_parse_pass_when_embedded_in_narrative() -> None:
 def test_parses_pass_with_justification_on_same_line() -> None:
     """Justification appended after the verdict on the same line is still PASS."""
     assert _parses_as_successful("OUTCOME: PASS — the agent correctly identified the bug.")
+
+
+# --- label_file integration test (offline; uses fake client, no API) ---
+
+
+class _FakeClient:
+    """Stand-in for RateLimitedClient that returns canned responses."""
+
+    def __init__(self, response_text: str = "OUTCOME: PASS") -> None:
+        self._text = response_text
+        self.calls = 0
+
+    def complete(self, messages, max_tokens=2048, temperature=0.9):
+        self.calls += 1
+        return self._text, 0, 0
+
+
+def test_label_file_outcome_one_uses_llm_judge(tmp_path) -> None:
+    """outcome=1 trajectory: should call the judge and stamp label_method=llm_judge."""
+    from src.labeler.step_labeler import label_file
+    from src.utils.jsonl_io import write_trajectories, read_trajectories
+
+    src = tmp_path / "in.jsonl"
+    dst = tmp_path / "out.jsonl"
+    traj = _load_fixture()  # outcome=1
+    write_trajectories(src, [traj])
+
+    client = _FakeClient(response_text="OUTCOME: PASS")
+    label_file(src, dst, client, K=2)
+
+    out = list(read_trajectories(dst))
+    assert len(out) == 1
+    assert out[0].label_method == "llm_judge"
+    # tool steps got labeled
+    tool_labels = [s.step_label for s in out[0].trajectory if s.tool is not None]
+    assert all(l is not None for l in tool_labels)
+    # Judge always said PASS, so labels are 1.0
+    assert all(l == 1.0 for l in tool_labels)
+
+
+def test_label_file_outcome_zero_uses_simplification_method(tmp_path) -> None:
+    """outcome=0 trajectory: should NOT call judge; stamp outcome_zero_simplification."""
+    from src.labeler.step_labeler import label_file
+    from src.utils.jsonl_io import write_trajectories, read_trajectories
+
+    src = tmp_path / "in.jsonl"
+    dst = tmp_path / "out.jsonl"
+    traj = _load_fixture()
+    traj.outcome = 0
+    write_trajectories(src, [traj])
+
+    client = _FakeClient(response_text="OUTCOME: PASS")
+    label_file(src, dst, client, K=2)
+
+    out = list(read_trajectories(dst))
+    assert len(out) == 1
+    assert out[0].label_method == "outcome_zero_simplification"
+    # Judge must not have been called for outcome=0 path
+    assert client.calls == 0
+
+
+def test_label_file_mixed_outcomes_stamp_correctly(tmp_path) -> None:
+    """A file with both outcome=0 and outcome=1 should stamp each correctly."""
+    from src.labeler.step_labeler import label_file
+    from src.utils.jsonl_io import write_trajectories, read_trajectories
+
+    src = tmp_path / "in.jsonl"
+    dst = tmp_path / "out.jsonl"
+    t1 = _load_fixture()
+    t2 = _load_fixture()
+    t2.outcome = 0
+    t2.task_id = "synth-002-fail"
+    write_trajectories(src, [t1, t2])
+
+    client = _FakeClient(response_text="OUTCOME: FAIL")
+    label_file(src, dst, client, K=2)
+
+    out = list(read_trajectories(dst))
+    by_id = {t.task_id: t for t in out}
+    assert by_id["synth-001"].label_method == "llm_judge"
+    assert by_id["synth-002-fail"].label_method == "outcome_zero_simplification"
