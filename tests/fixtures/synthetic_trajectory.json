@@ -1,0 +1,33 @@
+{
+  "task_id": "synth-001",
+  "task_type": "swe-bench-lite",
+  "trajectory": [
+    {
+      "step": 0,
+      "role": "assistant",
+      "thought": "let me read the file",
+      "tool": "read_file",
+      "tool_args": {"path": "x.py"},
+      "tool_result": "def f(): pass"
+    },
+    {
+      "step": 1,
+      "role": "assistant",
+      "thought": "now I'll edit",
+      "tool": "edit",
+      "tool_args": {"path": "x.py", "diff": "..."},
+      "tool_result": "ok"
+    },
+    {
+      "step": 2,
+      "role": "assistant",
+      "thought": "run tests",
+      "tool": "bash",
+      "tool_args": {"cmd": "pytest"},
+      "tool_result": "passed"
+    }
+  ],
+  "outcome": 1,
+  "policy_model": "claude-sonnet-4-5",
+  "timestamp": "2026-05-27T10:00:00Z"
+}
