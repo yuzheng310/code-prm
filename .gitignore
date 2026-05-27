@@ -20,6 +20,3 @@ outputs/
 # OS
 .DS_Store
 Thumbs.db
-
-# Third party
-third_party/openr/
