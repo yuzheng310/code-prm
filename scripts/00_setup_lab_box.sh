@@ -47,7 +47,9 @@ fi
 echo "    ✓ $FREE_GB GB free in \$HOME"
 
 echo "==> [3/5] Initializing submodules..."
-git submodule update --init --recursive
+# Note: NOT using --recursive because OpenR has a broken nested submodule ref
+# (prm/preprocess-prm800k) in its tree. We only need the top-level OpenR clone.
+git submodule update --init
 echo "    ✓ submodules ready"
 
 echo "==> [4/5] Detecting install mode..."
