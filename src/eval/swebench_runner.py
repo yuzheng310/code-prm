@@ -71,12 +71,32 @@ def run_task_with_codeagent(
     return result.returncode == 0
 
 
+def load_bigcodebench_hard(limit: int = 300) -> list[dict[str, Any]]:
+    """Return up to `limit` rows from BigCodeBench-Hard.
+
+    BigCodeBench is harder than HumanEval/MBPP — closer to real-world tasks.
+    See https://huggingface.co/datasets/bigcode/bigcodebench-hard.
+    """
+    from datasets import load_dataset  # local import: heavy
+    ds = load_dataset("bigcode/bigcodebench-hard", split="v0.1.4")
+    n = min(limit, len(ds))
+    return [dict(row) for row in ds.select(range(n))]
+
+
 if __name__ == "__main__":
     # Smoke entry point: load tasks and print summary.
     tasks = load_swebench_lite()
     print(f"Loaded {len(tasks)} SWE-bench Lite tasks.")
     if tasks:
         first = tasks[0]
-        print(f"First instance: {first.get('instance_id', '<missing>')}")
+        print(f"First SWE-bench instance: {first.get('instance_id', '<missing>')}")
         print(f"Problem statement (first 200 chars):")
         print((first.get("problem_statement", "") or "")[:200])
+
+    print()
+    bc_tasks = load_bigcodebench_hard()
+    print(f"Loaded {len(bc_tasks)} BigCodeBench-Hard tasks.")
+    if bc_tasks:
+        first_bc = bc_tasks[0]
+        # BigCodeBench uses 'task_id' as identifier
+        print(f"First BigCodeBench task: {first_bc.get('task_id', '<missing>')}")
