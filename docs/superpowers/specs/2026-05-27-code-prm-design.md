@@ -306,7 +306,7 @@ CodeProcessBench 的 step 标签获取:
 
 | 周 | 任务 | Deliverable | 风险点 |
 |---|---|---|---|
-| W1 | Fork OpenR,在 PRM800K 数学数据上跑通 baseline | 训练 pipeline 跑通,3090 环境验证 | 环境问题 |
+| W1 | Fork OpenR + 验证 lab box 环境(pytest 全过即可,不再跑 OpenR baseline 训练 — 见 §13 决策) | 环境验证 + 项目骨架 ready | 环境问题 |
 | W2 | TS codeAgent 加 trajectory logging,跑 100 个 SWE-bench Lite 任务采主轨迹 | 第一批 trajectory.jsonl | codeAgent 集成问题 |
 | W3 | 实现 MC labeler,对全量 2400 trajectory 做 MC 标注;数据清洗 + token-level alignment | code_prm_train.jsonl 就绪 | MC 标签信号弱 |
 | W4 | 训 Qwen2.5-Coder-1.5B PRM,跑通收敛,初步 val F1 | 第一版 checkpoint | 不收敛 |
@@ -429,3 +429,21 @@ code-prm/
 | 任务集 | SWE-bench Lite + BigCodeBench-Hard | 只 SWE / 只 BigCode | 2026-05-27 |
 | ORM 兜底 | 不做 | 做 | 2026-05-27(用户决定) |
 | 二期 GRPO | 列 Future,不在本 scope | 现在做 | 2026-05-27 |
+| PRM 范式 | **scalar head + masked MSE**(VLM-PRM 同源) | OpenR `+/-` token 预测(Math-Shepherd 同源) | 2026-05-27 |
+| OpenR baseline 训练 | **跳过**(范式不同,且 OpenR 预处理 submodule broken) | 跑通 OpenR 数学 PRM | 2026-05-27 |
+
+### 决策说明:PRM 范式选择(2026-05-27)
+
+在实际 inspect OpenR 训练代码 (`prm/code/finetune_qwen_single_gpu.py`) 后发现,
+OpenR 使用的是 **next-token prediction on `+`/`-` 标记** 的训练范式(Math-Shepherd 同源),
+而非我们 spec §5.1 写的 **scalar reward head + masked MSE**(VLM-PRM 同源)。
+
+两种范式都合法,但实施差异较大。决策选择 scalar head,理由:
+1. 软标签信号无损(MC `mc_i ∈ [0,1]` 直接 MSE 回归;`+/-` 需离散化损失信号)
+2. 与 VLM-PRM repo 同源,简历叙事更"原创"("扩展 VLM-PRM 到 multi-turn agent")
+3. OpenR 的训练数据格式(`process` 字符串 + 步骤分隔 token)对 multi-turn tool trajectory 适配性差
+
+结果:**OpenR 不再作为"训练框架的主干",降级为"参考代码 + Best-of-N 推理算法源"**。
+- 不再跑 OpenR baseline 训练(原 Phase 1 Task 6-7,改为跳过)
+- Phase 2 训练代码以 VLM-PRM repo 的 scalar head 实现为模板,自写
+- OpenR 的 `reason/evaluation/` Best-of-N 推理算法仍在 Phase 3 复用

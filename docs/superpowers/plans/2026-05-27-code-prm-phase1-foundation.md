@@ -385,7 +385,25 @@ Confirm: ≥ 100GB free.
 
 ---
 
-### Task 5: Download PRM800K dataset (for OpenR baseline)
+### ⚠️ Tasks 5-7 status update (2026-05-27)
+
+After inspecting OpenR's real PRM training code (`prm/code/finetune_qwen_single_gpu.py`),
+we discovered OpenR uses **next-token `+/-` prediction** training, not the scalar-head
+MSE training our spec §5.1 specifies. See spec §13 decision log.
+
+**Phase 1 deviation:**
+- **Task 5 (PRM800K download)**: KEEP. Math PRM800K is still useful as a Phase 2 ablation
+  ("our scalar-head PRM also works on math benchmarks").
+- **Task 6 (OpenR baseline training)**: SKIP. We are NOT using OpenR's training paradigm,
+  so reproducing its math PRM is no longer on the critical path.
+- **Task 7 (OpenR baseline eval)**: SKIP for same reason.
+
+Environment validation is instead served by `pytest tests/ -v` (21 tests) passing on the
+lab box. If pytest passes, the env is healthy enough to proceed to Task 9+.
+
+---
+
+### Task 5: Download PRM800K dataset (kept — used as Phase 2 ablation)
 
 **Files:**
 - Modify: lab box `~/code-prm/data/prm800k/` (gitignored)
@@ -425,7 +443,12 @@ Expected: train ~100k lines, test ~3k lines.
 
 ---
 
-### Task 6: Run OpenR math-PRM training baseline (smoke test, small scale)
+### Task 6: ~~Run OpenR math-PRM training baseline~~ — SKIPPED (see header)
+
+The original content below is preserved for reference but **DO NOT RUN**. See Phase 1
+deviation note at top of "Week 1" section. Reason: OpenR uses a different PRM paradigm
+(`+/-` token prediction) than our spec (scalar head); reproducing it provides little signal
+for our actual Phase 2 training code.
 
 **Files:**
 - Create: `scripts/01_train_openr_baseline.sh`
@@ -506,7 +529,7 @@ git commit -m "exp: openr smoke training log (5k samples, loss converges)"
 
 ---
 
-### Task 7: Eval OpenR baseline on PRM800K test set
+### Task 7: ~~Eval OpenR baseline on PRM800K test set~~ — SKIPPED (see header)
 
 **Files:**
 - Create: `scripts/02_eval_openr_baseline.sh`
