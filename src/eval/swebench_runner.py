@@ -1,13 +1,24 @@
-"""SWE-bench Lite task loader + codeAgent invoker.
+"""SWE-bench Lite / BigCodeBench-Hard task loaders + TS codeAgent launcher.
 
-Two responsibilities:
-1. Load the SWE-bench Lite task list (300 Python bug-fix tasks).
-2. Invoke the user's TypeScript codeAgent on a single task as a subprocess,
-   passing CODE_PRM_LOG_DIR so the TS side writes trajectory jsonl.
+This module is NOT a full SWE-bench harness. It does TWO things:
 
-The actual pass/fail outcome is written by the TS side into the jsonl
-(per `src/collector/ts_logger_spec.md`). This module's return value
-indicates only whether the subprocess succeeded.
+1. Load task lists from the public benchmarks (via HuggingFace `datasets`).
+2. Launch the user's TypeScript codeAgent as a subprocess on a single task,
+   passing env vars so the TS side can:
+       - emit a trajectory jsonl line (CODE_PRM_LOG_DIR)
+       - tag the trajectory with rollout_id / run_id (CODE_PRM_*)
+       - receive the task payload (SWEBENCH_TASK_JSON)
+
+OUTCOME ATTRIBUTION (read this carefully):
+   The pass/fail "outcome" stored in the trajectory is decided by the TS
+   codeAgent, NOT by this Python module. The TS side is responsible for
+   running the task's tests (e.g. via SWE-bench docker harness or pytest
+   directly) and writing the `outcome` int into the jsonl.
+
+   This module only reports whether the subprocess exited non-zero
+   (process-level success), which is distinct from agent-task success.
+
+For a full SWE-bench eval with docker grading, see Phase 3 work.
 """
 from __future__ import annotations
 import json
@@ -21,11 +32,23 @@ def load_swebench_lite() -> list[dict[str, Any]]:
     """Return the full SWE-bench Lite test split (300 tasks).
 
     Lazily imports `datasets` to avoid forcing the dep on consumers that
-    only need the runner stub.
+    only need the launcher stub.
     """
     from datasets import load_dataset  # local import: heavy
     ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
     return [dict(row) for row in ds]
+
+
+def load_bigcodebench_hard(limit: int = 300) -> list[dict[str, Any]]:
+    """Return up to `limit` rows from BigCodeBench-Hard.
+
+    BigCodeBench is harder than HumanEval/MBPP — closer to real-world tasks.
+    See https://huggingface.co/datasets/bigcode/bigcodebench-hard.
+    """
+    from datasets import load_dataset  # local import: heavy
+    ds = load_dataset("bigcode/bigcodebench-hard", split="v0.1.4")
+    n = min(limit, len(ds))
+    return [dict(row) for row in ds.select(range(n))]
 
 
 def run_task_with_codeagent(
@@ -33,26 +56,31 @@ def run_task_with_codeagent(
     ts_repo: Path,
     log_dir: Path,
     timeout_sec: int = 600,
+    extra_env: dict[str, str] | None = None,
 ) -> bool:
-    """Run the TS codeAgent on one SWE-bench Lite task.
+    """Run the TS codeAgent on one task as a subprocess.
 
     Side effect: the TS side appends a trajectory line to
     `log_dir/<task_type>_<YYYYMMDD>.jsonl` (see `ts_logger_spec.md`).
 
     Args:
-        task: One row from `load_swebench_lite()`.
+        task: One row from a task-set loader.
         ts_repo: Path to the user's TS codeAgent repo.
-        log_dir: Where to write trajectory jsonl. Will be created if absent.
+        log_dir: Where to write trajectory jsonl. Created if absent.
         timeout_sec: Subprocess wall-clock timeout.
+        extra_env: Additional env vars (e.g. CODE_PRM_ROLLOUT_ID, CODE_PRM_RUN_ID)
+            forwarded to the TS subprocess.
 
     Returns:
-        True iff the subprocess exited with code 0. The actual test
-        outcome lives inside the jsonl line — read that to know.
+        True iff the subprocess exited 0. The agent-level pass/fail is in
+        the jsonl, NOT in this return value.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CODE_PRM_LOG_DIR"] = str(log_dir)
     env["SWEBENCH_TASK_JSON"] = json.dumps(task)
+    if extra_env:
+        env.update(extra_env)
 
     # TODO(user): Adjust this command to match your actual codeAgent CLI.
     # The placeholder assumes: `node <ts_repo>/dist/cli.js run --task-id X --task-type swe-bench-lite`
@@ -69,18 +97,6 @@ def run_task_with_codeagent(
         cmd, env=env, capture_output=True, text=True, timeout=timeout_sec,
     )
     return result.returncode == 0
-
-
-def load_bigcodebench_hard(limit: int = 300) -> list[dict[str, Any]]:
-    """Return up to `limit` rows from BigCodeBench-Hard.
-
-    BigCodeBench is harder than HumanEval/MBPP — closer to real-world tasks.
-    See https://huggingface.co/datasets/bigcode/bigcodebench-hard.
-    """
-    from datasets import load_dataset  # local import: heavy
-    ds = load_dataset("bigcode/bigcodebench-hard", split="v0.1.4")
-    n = min(limit, len(ds))
-    return [dict(row) for row in ds.select(range(n))]
 
 
 if __name__ == "__main__":

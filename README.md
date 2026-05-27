@@ -15,6 +15,6 @@ pytest tests/         # smoke test
 
 ## Status
 
-- [x] Phase 1: Foundation (data pipeline, OpenR baseline)
+- [ ] Phase 1: Foundation (in progress — code scaffold done, data collection pending)
 - [ ] Phase 2: Training
 - [ ] Phase 3: Eval & Ship

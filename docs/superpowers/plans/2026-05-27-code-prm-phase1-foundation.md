@@ -2,18 +2,38 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the data pipeline foundation — OpenR baseline reproduction + 2400 code-agent trajectories with step-level MC labels — so that Phase 2 (training) has clean inputs.
+## ⚠️ Plan revision log (2026-05-27, post-review)
 
-**Architecture:** Fork OpenR as Python training scaffold; instrument existing TypeScript codeAgent to emit `trajectory.jsonl`; build a Python MC labeler that re-rolls each step K=4 times with Claude Haiku to derive `mc_i ∈ [0,1]` soft labels (Math-Shepherd style).
+This plan was reviewed mid-execution. Multiple revisions apply — read these
+BEFORE running any task to avoid acting on stale text.
 
-**Tech Stack:** Python 3.11, PyTorch 2.4, Transformers, PEFT, OpenR (forked), Anthropic SDK, SWE-bench, BigCodeBench, TypeScript (codeAgent integration).
+| # | Revision | Affected sections |
+|---|---|---|
+| R1 | OpenR baseline TRAINING dropped (spec §13 decision); only the OpenR clone is kept for reference and Best-of-N inference code | Task 6, 7 (now SKIPPED) |
+| R2 | "MC labels" renamed to "step labels" everywhere. The Phase 1 labeler is an **LLM-judge surrogate**, not Monte-Carlo rollout (spec §5.3). Field `Step.mc_label` → `Step.step_label`. Module `mc_labeler.py` → `step_labeler.py`. Function `mc_rollout_for_step` → `llm_judge_score_step`. | Task 8, 16, 17, 18, 19 |
+| R3 | Trajectory schema extended with `run_id`, `rollout_id`, `repo`, `base_commit`, `final_diff`, `test_result`, `token_usage`, `label_method`. Replay/cost/test fields are optional but recommended. | Task 8 |
+| R4 | Collection output layout changed from nested `rollout_k/` subdirs to flat single directory. Trajectory carries `rollout_id` instead. TS logger must read `CODE_PRM_ROLLOUT_ID` and `CODE_PRM_RUN_ID` env vars. | Task 9, 13, 14, 19, 20 |
+| R5 | `glob("*.jsonl")` → `rglob("*.jsonl")` in label_all.py and downstream readers, for robustness against any future nested layouts. Output filenames flatten relative subpath with "__" to avoid collisions. | Task 19, 20 |
+| R6 | Cost tracking honesty: `collect_batch.py` does NOT enforce a hard budget cap (Python doesn't see real API spend). Soft pre-flight estimate only. Real cost via `src/utils/cost_aggregator.py` after collection, reading `Trajectory.token_usage`. | Task 12, 13, 14 |
+| R7 | `swebench_runner.py` renamed in spirit: it's a "task loader + TS launcher", not a full SWE-bench harness. Outcome attribution clarified — TS side decides, not Python. | Task 10 |
+| R8 | README checkbox initial state `[ ] Phase 1` (was `[x]` by mistake). | Task 1 |
+| R9 | Python pinned to 3.12 + PyTorch 2.5 + CUDA 12.4 to match rental GPU image. | Task 2 |
+
+The original task text below is preserved as history. Where it contradicts a
+revision above, the revision wins. Specific tasks (8, 13, 16, 17, 19, 20)
+should be cross-checked against the current source files before executing.
+
+**Goal:** Build the data pipeline foundation — 2400 code-agent trajectories with step-level labels (LLM-judge surrogate) — so that Phase 2 (training) has clean inputs.
+
+**Architecture:** Fork OpenR (reference only); instrument existing TypeScript codeAgent to emit `trajectory.jsonl`; build a Python step labeler that asks an LLM K=4 times per step whether the partial trajectory will succeed, recording the success fraction as `step_label ∈ [0, 1]` (LLM-judge surrogate; real MC deferred to Phase 2 future work).
+
+**Tech Stack:** Python 3.12, PyTorch 2.5, Transformers, PEFT, OpenR (referenced), Anthropic SDK, SWE-bench, BigCodeBench, TypeScript (codeAgent integration).
 
 **Deliverable at end of Phase 1:**
-- OpenR math-PRM baseline trained & verified on local 3090
-- `data/code-trajectory-2.4k/train.jsonl + val.jsonl + test.jsonl` with MC labels
-- Cost spent: ≤ $500 (Phase 1 portion of total $800 budget; remaining $300 reserved for Phase 3 end-to-end eval)
+- `data/code-trajectory-2.4k/{train,val,test}.jsonl` with LLM-judge step labels
+- Real cost (from token_usage aggregation) ≤ $500 (Phase 1 portion of $800 total)
 
-**Out of scope (later phases):** PRM training (Phase 2), CodeProcessBench + end-to-end eval (Phase 3).
+**Out of scope (later phases):** PRM training (Phase 2), CodeProcessBench + end-to-end eval (Phase 3), real MC rollout upgrade (Future Work).
 
 ---
 

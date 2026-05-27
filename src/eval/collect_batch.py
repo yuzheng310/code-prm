@@ -1,17 +1,25 @@
-"""Batched trajectory collection with concurrency + cost cap.
+"""Batched trajectory collection with concurrency + estimated cost cap.
 
 Runs the user's TypeScript codeAgent on every task in a chosen task set,
-N times each, with a semaphore-bounded concurrency. Halts when the
-shared CostTracker exceeds budget.
+N times each, with a semaphore-bounded concurrency.
 
-The TS side writes the actual trajectory jsonl (see ts_logger_spec.md).
-This module only orchestrates and tracks an *estimated* cost (because
-we don't get usage tokens back from the subprocess).
+COST TRACKING NOTE: This driver does NOT see real API usage — it just
+pre-checks an *estimated* budget. The TS codeAgent writes real
+`token_usage` into each trajectory (see ts_logger_spec.md), and the real
+cost should be aggregated AFTER collection via
+`src.utils.cost_aggregator`. The `--budget_usd` here is a soft pre-flight
+estimate, not a hard guarantee.
+
+OUTPUT LAYOUT: All rollouts of all tasks write to a single flat directory
+`--log_dir`. The TS side receives `CODE_PRM_ROLLOUT_ID=k` per invocation
+and stamps the trajectory record's `rollout_id`. Downstream code can read
+the entire dataset via `glob("*.jsonl")` without recursing.
 """
 from __future__ import annotations
 import argparse
 import asyncio
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +33,8 @@ from src.eval.swebench_runner import (
 from src.utils.cost_tracker import CostTracker
 
 
-# Per-trajectory cost estimates (very approximate; updated based on pilot).
+# Per-trajectory cost estimates (very approximate; refine after pilot).
+# These are intentionally pessimistic so the soft cap fires early.
 EST_INPUT_TOK_PER_TRAJECTORY = 25_000
 EST_OUTPUT_TOK_PER_TRAJECTORY = 5_000
 
@@ -46,30 +55,39 @@ async def collect(
     budget_usd: float,
     policy_model: str = "claude-sonnet-4-5",
 ) -> CostTracker:
-    """Drive end-to-end collection. Returns the tracker for caller inspection."""
+    """Drive end-to-end collection. Returns the (estimated) tracker."""
     tracker = CostTracker(budget_usd=budget_usd)
     tasks = _load_tasks(task_set)
     ts_repo = Path(os.environ["TS_REPO_PATH"])
+    log_dir.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(concurrency)
     total_runs = len(tasks) * num_rollouts
 
     print(f"Collecting {len(tasks)} tasks x {num_rollouts} rollouts = {total_runs} runs")
-    print(f"Concurrency: {concurrency}, Budget: ${budget_usd:.2f}")
+    print(f"Concurrency: {concurrency}, Estimated budget cap: ${budget_usd:.2f}")
+    print(f"Output dir (flat): {log_dir}")
+    print("NOTE: real cost will be in trajectory token_usage; aggregate afterward.")
 
     async def one_run(task: dict[str, Any], k: int) -> None:
         async with sem:
             if tracker.over_budget():
                 return
+            run_id = str(uuid.uuid4())
+            extra_env = {
+                "CODE_PRM_ROLLOUT_ID": str(k),
+                "CODE_PRM_RUN_ID": run_id,
+            }
             loop = asyncio.get_running_loop()
-            run_log_dir = log_dir / f"rollout_{k}"
             await loop.run_in_executor(
                 None,
                 run_task_with_codeagent,
                 task,
                 ts_repo,
-                run_log_dir,
+                log_dir,
+                600,           # timeout_sec
+                extra_env,
             )
-            # Approximate cost (no usage info from subprocess).
+            # Pessimistic estimate; real cost is in trajectory.token_usage.
             tracker.add(
                 policy_model,
                 input_tokens=EST_INPUT_TOK_PER_TRAJECTORY,
@@ -89,6 +107,10 @@ async def collect(
         await asyncio.gather(*coros)
 
     print(tracker)
+    print(
+        "\n[!] The above is ESTIMATED cost. Aggregate real cost via:\n"
+        "    python -m src.utils.cost_aggregator --dir " + str(log_dir)
+    )
     return tracker
 
 

@@ -115,11 +115,16 @@
 
 ### 4.3 接口契约
 
-**Trajectory Collector → jsonl** (每行一条 trajectory):
+**Trajectory Collector → jsonl** (每行一条 trajectory,字段权威定义见 `src/labeler/trajectory_schema.py`):
 ```json
 {
   "task_id": "django__django-12345",
   "task_type": "swe-bench-lite",
+  "run_id": "uuid-v4-string",
+  "rollout_id": 0,
+  "repo": "django/django",
+  "base_commit": "abc123...",
+  "final_diff": "diff --git a/...\n...",
   "trajectory": [
     {
       "step": 0,
@@ -131,20 +136,23 @@
     }
   ],
   "outcome": 1,
-  "policy_model": "claude-sonnet-4.5",
-  "timestamp": "2026-..."
+  "test_result": {"passed": true, "command": "pytest", "exit_code": 0, "duration_sec": 12.5},
+  "policy_model": "claude-sonnet-4-5",
+  "timestamp": "2026-...",
+  "token_usage": {"input_tokens": 25000, "output_tokens": 5000, "cost_usd": 0.15}
 }
 ```
 
-**MC Labeler → labeled.jsonl** (在 trajectory 上增加每 step 标签):
+**Step Labeler → labeled.jsonl** (在 trajectory 上增加每 step 标签 + 标注 `label_method`):
 ```json
 {
   "task_id": "...",
   "trajectory": [
-    {"step": 0, "...": "...", "mc_label": 0.625},
-    {"step": 1, "...": "...", "mc_label": 0.875}
+    {"step": 0, "...": "...", "step_label": 0.625},
+    {"step": 1, "...": "...", "step_label": 0.875}
   ],
-  "outcome": 1
+  "outcome": 1,
+  "label_method": "llm_judge"
 }
 ```
 
@@ -184,18 +192,37 @@ Reward head 设计完全照搬 VLM-PRM repo,经过验证可工作。
 
 ### 5.2 损失函数
 
-Masked-MSE(Math-Shepherd 风格):
+Masked-MSE(Math-Shepherd 风格,但标签来源见 §5.3):
 
-$$\mathcal{L} = \frac{1}{\sum_i m_i} \sum_i m_i \cdot (r_i - mc_i)^2$$
+$$\mathcal{L} = \frac{1}{\sum_i m_i} \sum_i m_i \cdot (r_i - y_i)^2$$
 
-其中 `r_i` 是 PRM 第 i 步预测,`mc_i` 是 MC rollout 标签,`m_i` 是 valid step mask。
+其中 `r_i` 是 PRM 第 i 步预测,`y_i` 是 step_label(Phase 1 来自 LLM judge surrogate;Phase 2 future 可换成真 MC rollout),`m_i` 是 valid step mask。
 
-### 5.3 MC 标签生成
+### 5.3 Step 标签生成 — Phase 1: LLM-judge surrogate
 
-- 对每条 outcome=1 的训练 trajectory,对其中**有工具调用的 step**(忽略纯 thought)做 K=4 次续跑
-- 续跑用 **Claude Haiku**(降本)
-- `mc_i = (K 次续跑中成功数) / K`
-- outcome=0 的 trajectory:简化处理,整条按 `mc_i = 0` 标(Math-Shepherd 简化版,避免噪声)
+**这一节诚实声明:Phase 1 的 `step_label` 不是真实 Monte Carlo rollout,而是 LLM-judge surrogate(weak supervision)。**
+
+**算法**:
+- 对每条 outcome=1 的训练 trajectory,对其中**有工具调用的 step**(忽略纯 thought)做 K=4 次 LLM-judge call
+- LLM(Claude Haiku)接收 trajectory prefix,被要求预测"final outcome PASS/FAIL"
+- `step_label_i = (K 次 judge 中预测 PASS 的数) / K`
+- outcome=0 的 trajectory:整条按 `step_label = 0` 标(outcome-only 简化,避免噪声)
+- 输出 trajectory 标注 `label_method = "llm_judge"`
+
+**为什么不做真 MC**:
+- 真 MC 要求 step-level 状态恢复(repo checkpoint / agent state replay)+ 沙箱化 pytest 执行
+- 工程量 3-4 周,标注 API 成本翻 4-8 倍(单条 trajectory 从 ~$0.05 涨到 ~$0.3)
+- 1.5-2 月时间窗口外
+- Phase 2 Future Work 列了升级路径
+
+**这种 surrogate 的 known limitations**:
+1. **Judge bias**:Haiku 对 partial code trajectory 的"PASS 概率"判断有 calibration 误差,可能系统性高估或低估
+2. **粒度损失**:LLM 是"预测最终结果",不是"step-level 因果归因"——它可能把好步骤错判成坏,或反之
+3. **outcome=0 全 0 简化**:失败 trajectory 的所有 step 都标 0,丢失了"中间步骤可能是对的"的信号(Math-Shepherd 也这么做,所以可接受)
+
+**Phase 1 这个 surrogate 仍然足够支撑 PRM 训练**——只要 judge 比 random 强,PRM 学到的 ranking 信号就有用。Best-of-N 评测会直接验证。
+
+**如果 Phase 1 PRM 在 Best-of-N 上没涨点,优先怀疑 surrogate 信号弱,升 K 值到 8 或切换 judge 模型到 Sonnet,而不是立即上真 MC**。
 
 ### 5.4 训练超参数
 
@@ -402,6 +429,13 @@ code-prm/
 
 ## 11. Future Work(超出本 spec scope)
 
+- **Real Monte-Carlo rollout 标注**(替换 Phase 1 的 LLM-judge surrogate):
+  - 给 TS codeAgent 加 state checkpoint / replay 能力
+  - Python 端实现沙箱化 pytest 执行(SWE-bench docker harness)
+  - 每个 step 真的让 agent 续跑 K 次,真的跑 pytest,真的统计成功率
+  - 预计工程量:3-4 周,API 成本 4-8x
+  - `Trajectory.repo / base_commit / final_diff` 字段已预留
+
 - **二期 GRPO**:用本 PRM 作为 dense reward,在 Qwen2.5-Coder-1.5B 上做 GRPO policy 训练(参考 veRL / OpenR 的 RL 模块)
 - **Tree Search**:接入 MCTS,把 PRM 当 value function
 - **Self-improvement loop**:GRPO 出来的更强 policy 重新跑 trajectory → 重训 PRM → 再 GRPO,形成迭代
@@ -431,6 +465,10 @@ code-prm/
 | 二期 GRPO | 列 Future,不在本 scope | 现在做 | 2026-05-27 |
 | PRM 范式 | **scalar head + masked MSE**(VLM-PRM 同源) | OpenR `+/-` token 预测(Math-Shepherd 同源) | 2026-05-27 |
 | OpenR baseline 训练 | **跳过**(范式不同,且 OpenR 预处理 submodule broken) | 跑通 OpenR 数学 PRM | 2026-05-27 |
+| Step 标签方法 | **LLM-judge surrogate**(诚实命名,Phase 2 可升 real MC) | 真实 Monte Carlo rollout(3-4 周工程量+成本翻倍) | 2026-05-27(review 后) |
+| Trajectory schema | 扩展含 `run_id` / `rollout_id` / `repo` / `base_commit` / `final_diff` / `test_result` / `token_usage` / `label_method` | 最小 schema(只 task_id/trajectory/outcome) | 2026-05-27(review 后) |
+| 数据目录布局 | flat:所有 rollout 同一目录,trajectory 自带 `rollout_id` | nested `rollout_k/` 子目录(易导致 glob 漏读) | 2026-05-27(review 后) |
+| 成本追踪 | TS 上报真实 `token_usage` → Python 端 `cost_aggregator` 汇总;collect_batch 仅做粗估软上限 | Python 估算 input/output token 作硬上限 | 2026-05-27(review 后) |
 
 ### 决策说明:PRM 范式选择(2026-05-27)
 

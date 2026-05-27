@@ -1,9 +1,9 @@
-"""Unit tests for the MC labeler (pure functions that don't hit the API)."""
+"""Unit tests for the step labeler (pure functions that don't hit the API)."""
 from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.labeler.mc_labeler import (
+from src.labeler.step_labeler import (
     _build_continuation_prompt,
     _parses_as_successful,
     label_trajectory_simplified,
@@ -21,16 +21,16 @@ def test_outcome_zero_gets_all_zero_labels() -> None:
     t = _load_fixture()
     t.outcome = 0
     labeled = label_trajectory_simplified(t)
-    assert all(s.mc_label == 0.0 for s in labeled.trajectory)
+    assert all(s.step_label == 0.0 for s in labeled.trajectory)
 
 
 def test_outcome_one_left_unchanged_by_simplified_labeler() -> None:
     """outcome=1 path should NOT get labels from the simplified labeler.
-    Real labels must come from mc_rollout_for_step()."""
+    Real labels must come from llm_judge_score_step()."""
     t = _load_fixture()
     assert t.outcome == 1
     labeled = label_trajectory_simplified(t)
-    assert all(s.mc_label is None for s in labeled.trajectory)
+    assert all(s.step_label is None for s in labeled.trajectory)
 
 
 def test_continuation_prompt_includes_task_id() -> None:
