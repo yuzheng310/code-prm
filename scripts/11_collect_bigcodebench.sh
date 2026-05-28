@@ -7,6 +7,8 @@ set -euo pipefail
 : "${ANTHROPIC_API_KEY:?must be set in env}"
 : "${TS_REPO_PATH:?must be set in .env or shell}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
+echo "[env] ANTHROPIC_BASE_URL: $ANTHROPIC_BASE_URL"
 
 LOG_DIR="${CODE_PRM_LOG_DIR:-$PWD/data/raw/bigcodebench-hard}"
 mkdir -p "$LOG_DIR"

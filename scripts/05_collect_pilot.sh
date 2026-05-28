@@ -23,6 +23,12 @@ set -euo pipefail
 # their own HF_ENDPOINT.
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
+# Anthropic relay default: DeepSeek's Anthropic-compatible endpoint.
+# Users with direct Anthropic access can override:
+#   ANTHROPIC_BASE_URL=https://api.anthropic.com bash scripts/...
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
+echo "[env] ANTHROPIC_BASE_URL: $ANTHROPIC_BASE_URL"
+
 LOG_DIR="${CODE_PRM_LOG_DIR:-$PWD/data/raw/pilot}"
 mkdir -p "$LOG_DIR"
 

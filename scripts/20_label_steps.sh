@@ -7,6 +7,8 @@
 set -euo pipefail
 
 : "${ANTHROPIC_API_KEY:?must be set in env}"
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
+echo "[env] ANTHROPIC_BASE_URL: $ANTHROPIC_BASE_URL"
 
 python -m src.labeler.label_all \
     --input_dir data/raw/swebench-lite \

@@ -176,22 +176,65 @@ def label_file(
         only_tool_steps: If True, skip pure-thought steps (tool is None) in
             BOTH success and failure paths. They keep step_label = None.
     """
+    import time as _time
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     if tmp_path.exists():
         tmp_path.unlink()
 
+    # First pass to count total tool steps (for progress %).
+    # Cheap (a few hundred lines max); avoids loading file twice into memory.
+    total_steps_to_label = 0
+    n_traj_total = 0
+    for traj in read_trajectories(input_path):
+        n_traj_total += 1
+        if traj.outcome == 1:
+            for s in traj.trajectory:
+                if only_tool_steps and s.tool is None:
+                    continue
+                total_steps_to_label += 1
+    print(
+        f"  [{input_path.name}] {n_traj_total} trajectories, "
+        f"{total_steps_to_label} tool-steps to label (K={K} -> "
+        f"~{total_steps_to_label * K} API calls)",
+        flush=True,
+    )
+
+    done_steps = 0
     try:
-        for traj in read_trajectories(input_path):
+        for ti, traj in enumerate(read_trajectories(input_path)):
+            t_start = _time.monotonic()
             if traj.outcome == 0:
                 label_trajectory_simplified(traj, only_tool_steps=only_tool_steps)
                 traj.label_method = "outcome_zero_simplification"
+                print(
+                    f"    [traj {ti+1}/{n_traj_total}] task={traj.task_id} "
+                    "outcome=0 → simplification (no API calls)",
+                    flush=True,
+                )
             else:
+                step_count = 0
                 for i, step in enumerate(traj.trajectory):
                     if only_tool_steps and step.tool is None:
                         continue
                     step.step_label = llm_judge_score_step(traj, i, client, K=K)
+                    step_count += 1
+                    done_steps += 1
+                    pct = done_steps / max(total_steps_to_label, 1) * 100
+                    print(
+                        f"      step {i} (tool={step.tool}): "
+                        f"label={step.step_label:.2f}  "
+                        f"[{done_steps}/{total_steps_to_label} = {pct:.0f}%]",
+                        flush=True,
+                    )
                 traj.label_method = "llm_judge"
+                elapsed = _time.monotonic() - t_start
+                print(
+                    f"    [traj {ti+1}/{n_traj_total}] task={traj.task_id} "
+                    f"outcome=1 → llm_judge: {step_count} steps in {elapsed:.1f}s",
+                    flush=True,
+                )
             append_trajectory(tmp_path, traj)
     except BaseException:
         # Includes BudgetExceededError, KeyboardInterrupt, etc.

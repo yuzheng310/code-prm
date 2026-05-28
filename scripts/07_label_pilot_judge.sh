@@ -18,19 +18,9 @@
 set -euo pipefail
 
 : "${ANTHROPIC_API_KEY:?must be set in env}"
-# ANTHROPIC_BASE_URL is honored automatically by anthropic_client.py if set.
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
 echo "[env] ANTHROPIC_API_KEY:  ${ANTHROPIC_API_KEY:0:10}..."
-echo "[env] ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-<not set; will use Anthropic default>}"
-if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-    echo ""
-    echo "[!] WARNING: ANTHROPIC_BASE_URL is not exported in this shell."
-    echo "    If your API key is from a relay (DeepSeek, AnyRouter, etc.),"
-    echo "    direct calls to api.anthropic.com will return 403."
-    echo "    Export the URL first, e.g.:"
-    echo "      export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic"
-    echo "    Then re-run this script."
-    echo ""
-fi
+echo "[env] ANTHROPIC_BASE_URL: $ANTHROPIC_BASE_URL"
 
 RAW_DIR="data/raw/pilot"
 FORCE_DIR="data/raw/pilot_force_pass"
