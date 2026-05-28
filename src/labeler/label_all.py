@@ -238,15 +238,11 @@ def main() -> None:
             print(f"  ERROR on {f}: {e}")
             in_meta["error"] = repr(e)
             skipped.append(in_meta)
-            if tracker.over_budget():
-                print("Over budget — stopping.")
-                break
             continue
         processed.append(in_meta)
         print(f"  cost so far: {tracker}")
-        if tracker.over_budget():
-            print("OVER BUDGET — stopping.")
-            break
+        # Budget enforcement disabled — monitor spend via the relay dashboard
+        # or cost_aggregator. CostTracker still accumulates for reporting only.
 
     finished_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
     manifest = {

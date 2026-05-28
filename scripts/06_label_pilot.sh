@@ -22,7 +22,7 @@ echo "[env] ANTHROPIC_BASE_URL: $ANTHROPIC_BASE_URL"
 python -m src.labeler.label_all \
     --input_dir "${PILOT_RAW_DIR:-data/raw/pilot}" \
     --output_dir "${PILOT_LABELED_DIR:-data/labeled/pilot}" \
-    --budget_usd 5 \
+    --budget_usd 1000000 \
     --K 4 \
     --clean \
     --allow_low_task_prompt_coverage

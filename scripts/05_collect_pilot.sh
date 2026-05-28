@@ -39,7 +39,7 @@ python -m src.eval.collect_batch \
     --limit 10 \
     --timeout_sec 300 \
     --log_dir "$LOG_DIR" \
-    --budget_usd 10 \
+    --budget_usd 1000000 \
     --clean \
     --stream_output
 

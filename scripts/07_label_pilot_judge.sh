@@ -47,7 +47,7 @@ print(f'Force-passed {n_traj} trajectories into ${FORCE_DIR}/')
 python -m src.labeler.label_all \
     --input_dir "$FORCE_DIR" \
     --output_dir "$LABEL_DIR" \
-    --budget_usd 5 \
+    --budget_usd 1000000 \
     --K 4 \
     --clean \
     --allow_low_task_prompt_coverage

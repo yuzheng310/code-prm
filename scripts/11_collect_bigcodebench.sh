@@ -18,5 +18,5 @@ python -m src.eval.collect_batch \
     --num_rollouts 4 \
     --concurrency 4 \
     --log_dir "$LOG_DIR" \
-    --budget_usd 100 \
+    --budget_usd 1000000 \
     --clean

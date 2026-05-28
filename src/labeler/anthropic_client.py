@@ -99,8 +99,9 @@ class RateLimitedClient:
             BudgetExceededError: pre-check before issuing the request.
             RateLimitError / APIError: only if all 5 retries are exhausted.
         """
-        if self.tracker.over_budget():
-            raise BudgetExceededError(f"Over budget: {self.tracker}")
+        # Budget enforcement removed by request (cost monitored via relay
+        # dashboard / cost_aggregator instead). CostTracker still accumulates
+        # for reporting, but never aborts.
 
         kwargs: dict[str, Any] = {
             "model": self.model,

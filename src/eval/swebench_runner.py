@@ -132,6 +132,19 @@ def run_task_with_codeagent(
         or task.get("instruct_prompt")
         or f"Solve task {task_id}"
     )
+
+    # For BigCodeBench tasks, tell the agent where to write the solution so
+    # the grader (trajectory_logger.ts → runBigCodeBenchGrader) can find it.
+    # The BigCodeBench `test` field expects `from task import <entry_point>`,
+    # so the canonical filename is `task.py`.
+    if task_type == "bigcodebench-hard":
+        problem_text = (
+            "IMPORTANT: Write your final solution to a file named `task.py` "
+            "in the current working directory. The grader imports your "
+            "solution as `from task import <function_name>`.\n\n"
+            + problem_text
+        )
+
     cmd = [
         "node",
         str(ts_repo / "dist" / "cli.js"),

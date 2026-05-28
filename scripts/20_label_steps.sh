@@ -13,13 +13,13 @@ echo "[env] ANTHROPIC_BASE_URL: $ANTHROPIC_BASE_URL"
 python -m src.labeler.label_all \
     --input_dir data/raw/swebench-lite \
     --output_dir data/labeled/swebench-lite \
-    --budget_usd 80 \
+    --budget_usd 1000000 \
     --K 4 \
     --clean
 
 python -m src.labeler.label_all \
     --input_dir data/raw/bigcodebench-hard \
     --output_dir data/labeled/bigcodebench-hard \
-    --budget_usd 60 \
+    --budget_usd 1000000 \
     --K 4 \
     --clean

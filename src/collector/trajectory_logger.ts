@@ -112,6 +112,73 @@ function inferTaskPrompt(task: Record<string, unknown>): string | null {
   return null;
 }
 
+async function runBigCodeBenchGrader(
+  traj: Trajectory,
+  pi: ExtensionAPI,
+): Promise<void> {
+  // BigCodeBench-Hard task structure (from HF dataset):
+  //   instruct_prompt / prompt: the task description
+  //   code_prompt:              the function signature stub
+  //   canonical_solution:       reference impl (ignore for grading)
+  //   test:                     unittest TestCase code that imports the solution
+  //   entry_point:              the function name expected
+  //
+  // The agent (pi) is told to write its solution to `task.py`. The
+  // test code expects `from task import <entry_point>`. We write the
+  // test to a temp file, run it, and capture pass/fail + tails.
+  //
+  // If the agent wrote elsewhere, the test will fail with ImportError —
+  // which is a legitimate signal (the agent didn't follow instructions
+  // and the task isn't solved correctly from the grader's POV).
+  const meta = traj.task_metadata as {
+    test?: string;
+    entry_point?: string;
+    task_id?: string;
+  };
+  const testCode = meta.test ?? "";
+  const testFile = path.join(
+    process.cwd(),
+    `_bcb_grader_${traj.run_id || "anon"}.py`,
+  );
+  const t0 = Date.now();
+  try {
+    fs.writeFileSync(testFile, testCode);
+    // 60s wall-clock timeout — most BigCodeBench tests run in seconds.
+    // Use unittest discovery on the single file.
+    const { stdout, stderr, code } = await pi.exec(
+      "timeout",
+      ["60", "python", testFile],
+    );
+    const passed = code === 0;
+    traj.test_result = {
+      passed,
+      command: `python ${path.basename(testFile)}`,
+      exit_code: code,
+      stdout_tail: truncate(stdout || "", 2000),
+      stderr_tail: truncate(stderr || "", 2000),
+      duration_sec: (Date.now() - t0) / 1000,
+    };
+    traj.outcome = passed ? 1 : 0;
+  } catch (e) {
+    traj.test_result = {
+      passed: false,
+      command: `python ${path.basename(testFile)}`,
+      exit_code: -1,
+      stdout_tail: "",
+      stderr_tail: String(e).slice(0, 2000),
+      duration_sec: (Date.now() - t0) / 1000,
+    };
+    traj.outcome = 0;
+  } finally {
+    try {
+      fs.unlinkSync(testFile);
+    } catch {
+      /* best effort cleanup */
+    }
+  }
+}
+
+
 function readToolResultText(content: unknown): string {
   // pi ToolResultEvent shape (per packages/agent/src/harness/types.ts):
   //   { type: "tool_result", toolCallId, toolName, input,
@@ -329,7 +396,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, _ctx) => {
     if (!traj) return;
 
-    // Run test command if supplied; otherwise outcome stays 0.
+    // ── Outcome resolution: priority order ──
+    // 1. CODE_PRM_TEST_COMMAND env: explicit shell command (legacy / SWE-bench)
+    // 2. BigCodeBench auto-grader: if task_type == bigcodebench-hard and
+    //    task_metadata.test is a string, write it to a temp file and run it
+    //    against the agent's solution.
+    // 3. Otherwise outcome stays 0 (no grader available).
     const testCmd = process.env.CODE_PRM_TEST_COMMAND;
     if (testCmd) {
       const t0 = Date.now();
@@ -356,6 +428,11 @@ export default function (pi: ExtensionAPI) {
         };
         traj.outcome = 0;
       }
+    } else if (
+      traj.task_type === "bigcodebench-hard" &&
+      typeof (traj.task_metadata as { test?: unknown }).test === "string"
+    ) {
+      await runBigCodeBenchGrader(traj, pi);
     }
 
     // Capture final diff vs base_commit (if any).
