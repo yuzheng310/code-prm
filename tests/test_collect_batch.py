@@ -189,6 +189,36 @@ def test_low_jsonl_ratio_aborts_by_default(env, tmp_path) -> None:
     assert exc.value.code == 3
 
 
+def test_clean_ignores_hidden_dirs(env, tmp_path) -> None:
+    """Hidden directories (.ipynb_checkpoints, .cache, etc.) are tool
+    artifacts and must NOT trigger the foot-gun refusal."""
+    log_dir = tmp_path / "data" / "raw" / "pilot"
+    log_dir.mkdir(parents=True)
+    # Simulate Jupyter leaving a checkpoint
+    ckpt_dir = log_dir / ".ipynb_checkpoints"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "stale-checkpoint.jsonl").write_text('{"x": 1}\n')
+
+    _patch_loader_and_runner(env, n_tasks=1, status_for=lambda i, k: "ok")
+
+    # Should NOT raise — hidden dir is ignored.
+    try:
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=log_dir,
+            budget_usd=1000,
+            clean=True,
+            max_initial_failed_attempts=999,
+            allow_low_jsonl_success_ratio=True,
+        ))
+    except SystemExit:
+        pass  # ratio gate may fire; doesn't matter
+    # The hidden dir + its content must STILL be there (--clean didn't touch it).
+    assert ckpt_dir.exists()
+    assert (ckpt_dir / "stale-checkpoint.jsonl").exists()
+
+
 def test_clean_refuses_when_nested_jsonl_present(env, tmp_path) -> None:
     """If log_dir contains *.jsonl in subdirectories, --clean refuses.
 

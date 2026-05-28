@@ -141,7 +141,30 @@ async def collect(
     # only touch the flat-layer contract docs promise).
     existing_any = list(log_dir.rglob("*.jsonl"))
     direct_jsonl = list(log_dir.glob("*.jsonl"))
-    nested_jsonl = [p for p in existing_any if p not in direct_jsonl]
+
+    def _is_hidden_artifact(p: Path) -> bool:
+        """Hidden directories (Jupyter checkpoints, editor tmp, etc.) are
+        tool artifacts, not real sibling data. Ignore them in the
+        foot-gun check so a stale .ipynb_checkpoints/ doesn't refuse --clean."""
+        try:
+            rel = p.relative_to(log_dir)
+        except ValueError:
+            return False
+        return any(part.startswith(".") for part in rel.parts[:-1])
+
+    nested_jsonl = [
+        p for p in existing_any
+        if p not in direct_jsonl and not _is_hidden_artifact(p)
+    ]
+    hidden_jsonl = [
+        p for p in existing_any
+        if p not in direct_jsonl and _is_hidden_artifact(p)
+    ]
+    if hidden_jsonl:
+        print(
+            f"[!] Ignoring {len(hidden_jsonl)} *.jsonl file(s) under hidden "
+            f"directories (Jupyter / editor artifacts): {hidden_jsonl[:3]}"
+        )
     if existing_any:
         if clean and allow_append:
             raise RuntimeError("--clean and --allow_append are mutually exclusive.")
