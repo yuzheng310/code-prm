@@ -20,7 +20,8 @@ python -m src.eval.collect_batch \
     --concurrency 1 \
     --limit 10 \
     --log_dir "$LOG_DIR" \
-    --budget_usd 10
+    --budget_usd 10 \
+    --clean
 
 echo ""
 echo "=== Pilot done. Inspect: ==="

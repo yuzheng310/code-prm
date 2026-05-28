@@ -128,10 +128,24 @@ def main() -> None:
                 )
                 raise SystemExit(2)
 
-    if args.clean and args.output_dir.exists():
-        import shutil
-        print(f"Removing existing output dir: {args.output_dir}")
-        shutil.rmtree(args.output_dir)
+    if args.output_dir.exists():
+        existing_jsonl = list(args.output_dir.rglob("*.jsonl"))
+        if args.clean:
+            import shutil
+            print(f"Removing existing output dir: {args.output_dir}")
+            shutil.rmtree(args.output_dir)
+        elif existing_jsonl:
+            print(
+                f"\n[!] WARNING: --output_dir {args.output_dir} already contains "
+                f"{len(existing_jsonl)} *.jsonl file(s) from a prior run.\n"
+                "    New output files with the same flattened name will OVERWRITE\n"
+                "    individually (atomic), but stale files with names not\n"
+                "    produced this run will REMAIN and may contaminate downstream\n"
+                "    assembly. Pass --clean to wipe the directory first.\n"
+                "    Sleeping 5s — Ctrl-C to abort.\n"
+            )
+            import time
+            time.sleep(5)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 

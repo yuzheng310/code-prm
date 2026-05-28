@@ -13,6 +13,7 @@ Run from project root:
 """
 from __future__ import annotations
 import argparse
+import json
 import random
 import sys
 from collections import Counter
@@ -45,6 +46,58 @@ def collect_all(input_dirs: list[Path]) -> list[Trajectory]:
             all_trajs.extend(read_trajectories(f))
             print(f"  + {f}: {len(all_trajs) - n_before} trajectories")
     return all_trajs
+
+
+def inspect_manifests(input_dirs: list[Path]) -> list[CheckResult]:
+    """Read every `labeling_manifest.json` under each input dir, sanity-check.
+
+    For each manifest:
+    - print summary (when run, what model, K, task_prompt coverage achieved)
+    - check that processed_files' outputs all exist on disk
+    - warn (not fail) if no manifest is present in a labeled dir
+    """
+    results: list[CheckResult] = []
+    for d in input_dirs:
+        manifest_path = d / "labeling_manifest.json"
+        if not manifest_path.exists():
+            results.append(CheckResult(
+                name=f"manifest present in {d.name}",
+                passed=False,
+                detail=f"no labeling_manifest.json — did label_all run "
+                       f"successfully against {d}?",
+            ))
+            continue
+        try:
+            data = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            results.append(CheckResult(
+                name=f"manifest valid JSON in {d.name}",
+                passed=False,
+                detail=f"manifest unreadable: {e!r}",
+            ))
+            continue
+        # Print summary
+        print(
+            f"  Manifest in {d.name}: started={data.get('started_at')}, "
+            f"K={data.get('K')}, model={data.get('model')}, "
+            f"task_prompt_coverage={data.get('task_prompt_coverage')}, "
+            f"total_cost_usd={data.get('total_cost_usd')}"
+        )
+        missing_outputs: list[str] = []
+        for entry in data.get("processed_files", []):
+            out_path = Path(entry["output"])
+            if not out_path.exists():
+                missing_outputs.append(str(out_path))
+        results.append(CheckResult(
+            name=f"manifest outputs exist in {d.name}",
+            passed=len(missing_outputs) == 0,
+            detail=(
+                f"all {len(data.get('processed_files', []))} outputs present"
+                if not missing_outputs
+                else f"{len(missing_outputs)} output(s) missing (first: {missing_outputs[:3]})"
+            ),
+        ))
+    return results
 
 
 def split(
@@ -259,14 +312,19 @@ def main() -> None:
         sys.exit(1)
 
     if not args.skip_checks:
+        print("\nInspecting labeling manifests...")
+        manifest_results = inspect_manifests(args.input_dirs)
+
         print("\nRunning Phase 1 exit-criteria checks...")
-        results = run_all_checks(all_trajs)
-        for r in results:
+        criteria_results = run_all_checks(all_trajs)
+
+        all_results = manifest_results + criteria_results
+        for r in all_results:
             mark = "PASS" if r.passed else "FAIL"
             print(f"  [{mark}] {r.name}: {r.detail}")
-        if any(not r.passed for r in results):
+        if any(not r.passed for r in all_results):
             print(
-                "\n[FATAL] One or more exit-criteria checks failed.\n"
+                "\n[FATAL] One or more pre-assembly checks failed.\n"
                 "Fix the upstream pipeline (collection/labeling) and re-run.\n"
                 "Or pass --skip_checks to assemble anyway (NOT recommended\n"
                 "for final Phase 1 dataset).\n"

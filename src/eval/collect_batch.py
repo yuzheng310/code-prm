@@ -98,6 +98,10 @@ async def collect(
     timeout_sec: int = 600,
     limit: int | None = None,
     max_initial_failed_attempts: int = 5,
+    clean: bool = False,
+    allow_append: bool = False,
+    min_jsonl_success_ratio: float = 0.8,
+    allow_low_jsonl_success_ratio: bool = False,
 ) -> tuple[CostTracker, CollectionStats]:
     """Drive end-to-end collection. Returns (tracker, stats).
 
@@ -127,7 +131,35 @@ async def collect(
             "If your CLI lives elsewhere, edit src/eval/swebench_runner.py "
             "`run_task_with_codeagent` to point to it."
         )
+
+    # Log-dir hygiene: refuse to silently append onto a previous run.
     log_dir.mkdir(parents=True, exist_ok=True)
+    existing = list(log_dir.rglob("*.jsonl"))
+    if existing:
+        if clean and allow_append:
+            raise RuntimeError("--clean and --allow_append are mutually exclusive.")
+        if clean:
+            import shutil
+            for p in existing:
+                p.unlink()
+            # Clean out any empty subdirs as well (rmtree + recreate is safer
+            # but we keep the original directory to preserve permissions).
+            for child in log_dir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+            print(f"Cleaned {len(existing)} stale jsonl file(s) from {log_dir}")
+        elif allow_append:
+            print(
+                f"[!] log_dir {log_dir} contains {len(existing)} existing "
+                "jsonl file(s); appending as requested. Downstream stats "
+                "WILL mix old and new trajectories."
+            )
+        else:
+            raise RuntimeError(
+                f"log_dir {log_dir} is non-empty (found "
+                f"{len(existing)} *.jsonl file(s)). Refusing to append "
+                "silently. Pass --clean to wipe, or --allow_append to merge."
+            )
     sem = asyncio.Semaphore(concurrency)
     total_runs = len(tasks) * num_rollouts
 
@@ -252,15 +284,21 @@ async def collect(
     print(f"Subprocess successes:        {stats.succeeded}")
     if stats.succeeded > 0:
         ratio = jsonl_lines / stats.succeeded
-        if ratio < 0.8:
-            print(
-                f"\n[WARNING] Only {jsonl_lines}/{stats.succeeded} successful "
-                f"runs produced a jsonl line ({ratio:.0%}). The TS logger may\n"
-                "not be wired up correctly. Inspect data/raw and check that\n"
-                "the TS side honors CODE_PRM_LOG_DIR per ts_logger_spec.md."
+        print(f"jsonl/success ratio: {ratio:.0%}  (threshold: {min_jsonl_success_ratio:.0%})")
+        if ratio < min_jsonl_success_ratio:
+            msg = (
+                f"\n[FATAL] Only {jsonl_lines}/{stats.succeeded} successful "
+                f"runs produced a jsonl line ({ratio:.0%} < "
+                f"{min_jsonl_success_ratio:.0%}). The TS logger is probably\n"
+                "not wired up correctly. Inspect data/raw and check that the\n"
+                "TS side honors CODE_PRM_LOG_DIR per ts_logger_spec.md.\n"
+                "Pass --allow_low_jsonl_success_ratio to proceed anyway."
             )
-        else:
-            print(f"jsonl/success ratio: {ratio:.0%} (acceptable)")
+            if allow_low_jsonl_success_ratio:
+                print(msg.replace("[FATAL]", "[WARNING (override active)]"))
+            else:
+                print(msg)
+                raise SystemExit(3)
     print(
         "\n[!] Cost above is ESTIMATED. Aggregate real cost via:\n"
         "    python -m src.utils.cost_aggregator --dir " + str(log_dir)
@@ -307,6 +345,26 @@ def main() -> None:
              "num_rollouts=4 a single broken task contributes 4 attempts. "
              "Catches config bugs early instead of burning the whole budget.",
     )
+    p.add_argument(
+        "--clean", action="store_true",
+        help="Wipe any existing *.jsonl files in --log_dir before collecting. "
+             "Default behavior is to ABORT if --log_dir is non-empty.",
+    )
+    p.add_argument(
+        "--allow_append", action="store_true",
+        help="Allow collection to merge into an existing non-empty --log_dir. "
+             "Use carefully — downstream stats will mix old and new trajectories.",
+    )
+    p.add_argument(
+        "--min_jsonl_success_ratio", type=float, default=0.8,
+        help="Required ratio of (jsonl lines written) / (subprocess successes). "
+             "Below this, collection exits non-zero. Default 0.80.",
+    )
+    p.add_argument(
+        "--allow_low_jsonl_success_ratio", action="store_true",
+        help="Proceed even if the jsonl/success ratio is below threshold. "
+             "Default is to ABORT after collection finishes.",
+    )
     args = p.parse_args()
 
     asyncio.run(
@@ -320,6 +378,10 @@ def main() -> None:
             timeout_sec=args.timeout_sec,
             limit=args.limit,
             max_initial_failed_attempts=args.max_initial_failed_attempts,
+            clean=args.clean,
+            allow_append=args.allow_append,
+            min_jsonl_success_ratio=args.min_jsonl_success_ratio,
+            allow_low_jsonl_success_ratio=args.allow_low_jsonl_success_ratio,
         )
     )
 

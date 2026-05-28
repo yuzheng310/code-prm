@@ -142,6 +142,26 @@ The pipeline still works without these, but the analysis quality drops:
 - `thought` longer than 2000 chars → keep first 2000.
 - `stdout_tail` / `stderr_tail` (in `test_result`) → keep last ~2000 chars each.
 
+## Process exit code convention
+
+This is crucial for the Python collector's `--max_initial_failed_attempts`
+guard. The TS CLI MUST distinguish:
+
+| Outcome | TS exit code | trajectory.outcome | Notes |
+|---|---|---|---|
+| Agent solved + tests pass | **0** | 1 | normal success |
+| Agent attempted + tests fail | **0** | 0 | normal task-level failure — process is healthy |
+| Agent crashed mid-run | **0** if a partial trajectory was logged, else non-zero | 0 if logged | best-effort: log what you have, exit 0 |
+| Config error (bad CLI args, missing env, code bug) | **non-zero** | (no jsonl written) | aborts the whole batch via launch_error/initial-failure guard |
+
+In short: **exit 0 means "the process ran to completion (regardless of
+whether the task passed)"**. Only exit non-zero on infrastructure errors
+that genuinely require human intervention.
+
+Violating this convention will make the Python collector either:
+(a) silently swallow agent crashes as task failures, or
+(b) abort the whole batch on benign task failures.
+
 ## Sample reference implementation
 
 See `<TS_REPO>/src/hooks/trajectory_logger.ts` for the recommended Node

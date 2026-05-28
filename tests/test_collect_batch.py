@@ -72,10 +72,95 @@ def test_limit_slices_tasks(env, tmp_path) -> None:
         budget_usd=1000,
         limit=10,
         max_initial_failed_attempts=999,  # disable for this test
+        allow_low_jsonl_success_ratio=True,  # fake runner doesn't write jsonl
     ))
     assert len(log) == 10
     assert stats.succeeded == 10
     assert stats.total == 10
+
+
+def test_non_empty_log_dir_aborts_without_clean(env, tmp_path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "stale.jsonl").write_text('{"x": 1}\n')
+
+    _patch_loader_and_runner(env, n_tasks=1, status_for=lambda i, k: "ok")
+
+    with pytest.raises(RuntimeError, match="non-empty"):
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=log_dir,
+            budget_usd=1000,
+        ))
+
+
+def test_non_empty_log_dir_cleaned_with_flag(env, tmp_path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "stale.jsonl").write_text('{"x": 1}\n')
+
+    _patch_loader_and_runner(env, n_tasks=1, status_for=lambda i, k: "ok")
+
+    asyncio.run(collect_batch.collect(
+        task_set="swebench-lite",
+        num_rollouts=1, concurrency=1,
+        log_dir=log_dir,
+        budget_usd=1000,
+        clean=True,
+        allow_low_jsonl_success_ratio=True,
+        max_initial_failed_attempts=999,
+    ))
+    # stale.jsonl should have been removed
+    assert not (log_dir / "stale.jsonl").exists()
+
+
+def test_clean_and_allow_append_mutually_exclusive(env, tmp_path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "stale.jsonl").write_text('{}\n')
+
+    _patch_loader_and_runner(env, n_tasks=1, status_for=lambda i, k: "ok")
+
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=log_dir,
+            budget_usd=1000,
+            clean=True, allow_append=True,
+        ))
+
+
+def test_low_jsonl_ratio_aborts_by_default(env, tmp_path) -> None:
+    """All subprocess succeed (returns 'ok') but no jsonl written → SystemExit(3)."""
+    log_dir = tmp_path / "logs"
+    _patch_loader_and_runner(env, n_tasks=5, status_for=lambda i, k: "ok")
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=log_dir,
+            budget_usd=1000,
+            max_initial_failed_attempts=999,
+        ))
+    assert exc.value.code == 3
+
+
+def test_low_jsonl_ratio_allowed_via_flag(env, tmp_path) -> None:
+    log_dir = tmp_path / "logs"
+    _patch_loader_and_runner(env, n_tasks=5, status_for=lambda i, k: "ok")
+
+    # Should NOT raise SystemExit
+    asyncio.run(collect_batch.collect(
+        task_set="swebench-lite",
+        num_rollouts=1, concurrency=1,
+        log_dir=log_dir,
+        budget_usd=1000,
+        max_initial_failed_attempts=999,
+        allow_low_jsonl_success_ratio=True,
+    ))
 
 
 def test_num_rollouts_multiplies(env, tmp_path) -> None:
@@ -89,6 +174,7 @@ def test_num_rollouts_multiplies(env, tmp_path) -> None:
         log_dir=tmp_path / "logs",
         budget_usd=1000,
         max_initial_failed_attempts=999,
+        allow_low_jsonl_success_ratio=True,
     ))
     assert stats.total == 12
     rollouts_seen = sorted({c["rollout"] for c in log})
@@ -128,6 +214,7 @@ def test_budget_exceeded_skips_remaining(env, tmp_path) -> None:
         log_dir=tmp_path / "logs",
         budget_usd=0.20,
         max_initial_failed_attempts=999,
+        allow_low_jsonl_success_ratio=True,
     ))
     assert stats.succeeded >= 1
     assert stats.succeeded < 20
@@ -149,6 +236,7 @@ def test_timeout_does_not_abort_gather(env, tmp_path) -> None:
         log_dir=tmp_path / "logs",
         budget_usd=1000,
         max_initial_failed_attempts=999,
+        allow_low_jsonl_success_ratio=True,
     ))
     # Task 0 timed out; tasks 1..4 should have succeeded (4 successes, 1 timeout).
     assert stats.timed_out == 1
@@ -191,6 +279,7 @@ def test_one_success_disables_initial_failure_guard(env, tmp_path) -> None:
         log_dir=tmp_path / "logs",
         budget_usd=1000,
         max_initial_failed_attempts=3,
+        allow_low_jsonl_success_ratio=True,
     ))
     # Even with 3 failures, total should be 10 (no abort).
     assert stats.total == 10
