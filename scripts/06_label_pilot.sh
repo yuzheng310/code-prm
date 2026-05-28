@@ -16,8 +16,8 @@ set -euo pipefail
 
 : "${ANTHROPIC_API_KEY:?must be set in env}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-# ANTHROPIC_BASE_URL is honored automatically by anthropic_client.py if set
-# (e.g., users on DeepSeek's Anthropic-compatible endpoint).
+echo "[env] ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-<not set; will use Anthropic default>}"
+# anthropic_client.py honors ANTHROPIC_BASE_URL automatically if set.
 
 python -m src.labeler.label_all \
     --input_dir "${PILOT_RAW_DIR:-data/raw/pilot}" \
