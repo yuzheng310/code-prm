@@ -139,26 +139,35 @@ async def collect(
         if clean and allow_append:
             raise RuntimeError("--clean and --allow_append are mutually exclusive.")
         if clean:
-            import shutil
+            # Conservative cleanup: only delete the *.jsonl files we found,
+            # then prune any directories that become empty as a result. DO
+            # NOT rmtree anything — protects against the foot-gun where a
+            # user sets CODE_PRM_LOG_DIR=$PWD/data/raw (parent of multiple
+            # task-set dirs) and would otherwise lose sibling collections.
             for p in existing:
                 p.unlink()
-            # Clean out any empty subdirs as well (rmtree + recreate is safer
-            # but we keep the original directory to preserve permissions).
-            for child in log_dir.iterdir():
+            # Walk depth-first and rmdir only empty dirs (silently skip
+            # non-empty ones, which preserves any non-jsonl artifacts).
+            for child in sorted(log_dir.rglob("*"), reverse=True):
                 if child.is_dir():
-                    shutil.rmtree(child)
+                    try:
+                        child.rmdir()
+                    except OSError:
+                        pass  # not empty — leave it
             print(f"Cleaned {len(existing)} stale jsonl file(s) from {log_dir}")
         elif allow_append:
             print(
                 f"[!] log_dir {log_dir} contains {len(existing)} existing "
                 "jsonl file(s); appending as requested. Downstream stats "
-                "WILL mix old and new trajectories."
+                "(including jsonl/success ratio) WILL mix old and new "
+                "trajectories — interpret with care."
             )
         else:
             raise RuntimeError(
                 f"log_dir {log_dir} is non-empty (found "
                 f"{len(existing)} *.jsonl file(s)). Refusing to append "
-                "silently. Pass --clean to wipe, or --allow_append to merge."
+                "silently. Pass --clean to wipe (only *.jsonl + empty "
+                "dirs are removed), or --allow_append to merge."
             )
     sem = asyncio.Semaphore(concurrency)
     total_runs = len(tasks) * num_rollouts
@@ -303,6 +312,22 @@ async def collect(
         "\n[!] Cost above is ESTIMATED. Aggregate real cost via:\n"
         "    python -m src.utils.cost_aggregator --dir " + str(log_dir)
     )
+
+    # If the batch was aborted due to a config-bug signal (launch_error or
+    # all early attempts failing), surface that to the shell as non-zero
+    # exit. Otherwise this function returns normally and the caller sees
+    # exit code 0 — misleading when nothing actually worked.
+    if abort_flag["set"] and abort_flag["reason"] in {
+        "launch_error",
+        "max_initial_failed_attempts",
+    }:
+        print(
+            f"\n[FATAL] Batch aborted due to {abort_flag['reason']}. "
+            "This signals a config bug, not transient task failure. "
+            "Exiting non-zero."
+        )
+        raise SystemExit(4)
+
     return tracker, stats
 
 

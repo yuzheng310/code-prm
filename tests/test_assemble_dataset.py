@@ -233,3 +233,84 @@ def test_run_all_checks_returns_six_results() -> None:
     ]
     results = assemble.run_all_checks(trajs)
     assert len(results) == 6
+
+
+# --- inspect_manifests (Fix 4 / round 7 + skipped_files in round 8) ---
+
+
+def _write_manifest(
+    dir_: Path,
+    *,
+    processed_outputs: list[Path],
+    skipped: list[dict] | None = None,
+) -> None:
+    import json as _json
+    manifest = {
+        "tool": "src.labeler.label_all",
+        "started_at": "2026-05-27T10:00:00Z",
+        "finished_at": "2026-05-27T11:00:00Z",
+        "input_dir": str(dir_),
+        "output_dir": str(dir_),
+        "K": 4,
+        "model": "claude-haiku-4-5",
+        "min_task_prompt_coverage": 0.95,
+        "task_prompt_coverage": 0.99,
+        "processed_files": [
+            {"input": "in", "input_size": 1, "input_mtime": 0,
+             "output": str(p)} for p in processed_outputs
+        ],
+        "skipped_files": skipped or [],
+        "cost_per_model": {},
+        "total_cost_usd": 0.0,
+    }
+    (dir_ / "labeling_manifest.json").write_text(_json.dumps(manifest))
+
+
+def test_inspect_manifests_passes_when_clean(tmp_path: Path) -> None:
+    out_file = tmp_path / "a.jsonl"
+    out_file.write_text("{}\n")
+    _write_manifest(tmp_path, processed_outputs=[out_file])
+    results = assemble.inspect_manifests([tmp_path])
+    assert all(r.passed for r in results), [r.detail for r in results]
+
+
+def test_inspect_manifests_fails_when_manifest_missing(tmp_path: Path) -> None:
+    # No manifest file at all
+    results = assemble.inspect_manifests([tmp_path])
+    assert any(not r.passed and "no labeling_manifest" in r.detail for r in results)
+
+
+def test_inspect_manifests_fails_when_output_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.jsonl"
+    # Don't create the file
+    _write_manifest(tmp_path, processed_outputs=[missing])
+    results = assemble.inspect_manifests([tmp_path])
+    assert any(not r.passed and "missing" in r.detail.lower() for r in results)
+
+
+def test_inspect_manifests_fails_when_skipped_files_present(tmp_path: Path) -> None:
+    out_file = tmp_path / "a.jsonl"
+    out_file.write_text("{}\n")
+    _write_manifest(
+        tmp_path,
+        processed_outputs=[out_file],
+        skipped=[{"input": "bad.jsonl", "error": "API timeout"}],
+    )
+    results = assemble.inspect_manifests([tmp_path])
+    assert any(
+        not r.passed and "skipped" in r.name.lower() and "1" in r.detail
+        for r in results
+    )
+
+
+def test_inspect_manifests_allows_skipped_with_flag(tmp_path: Path) -> None:
+    out_file = tmp_path / "a.jsonl"
+    out_file.write_text("{}\n")
+    _write_manifest(
+        tmp_path,
+        processed_outputs=[out_file],
+        skipped=[{"input": "bad.jsonl", "error": "API timeout"}],
+    )
+    results = assemble.inspect_manifests([tmp_path], allow_skipped=True)
+    # All checks should pass under the override
+    assert all(r.passed for r in results), [r.detail for r in results]

@@ -131,6 +131,28 @@ def main() -> None:
     if args.output_dir.exists():
         existing_jsonl = list(args.output_dir.rglob("*.jsonl"))
         if args.clean:
+            # Guard: refuse to delete a dir that contains/equals the input.
+            # This catches `--input_dir X --output_dir X --clean` which would
+            # otherwise destroy the source trajectories.
+            try:
+                in_resolved = args.input_dir.resolve(strict=False)
+                out_resolved = args.output_dir.resolve(strict=False)
+            except (OSError, RuntimeError):
+                in_resolved = args.input_dir
+                out_resolved = args.output_dir
+            if in_resolved == out_resolved:
+                raise SystemExit(
+                    f"FATAL: --output_dir == --input_dir ({out_resolved}). "
+                    "Refusing to --clean — that would destroy the input. "
+                    "Pick a separate output_dir."
+                )
+            if in_resolved.is_relative_to(out_resolved):
+                raise SystemExit(
+                    f"FATAL: --input_dir ({in_resolved}) lives under "
+                    f"--output_dir ({out_resolved}). Refusing to --clean — "
+                    "that would destroy the input. Pick a non-ancestor "
+                    "output_dir."
+                )
             import shutil
             print(f"Removing existing output dir: {args.output_dir}")
             shutil.rmtree(args.output_dir)

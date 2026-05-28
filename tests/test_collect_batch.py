@@ -95,6 +95,47 @@ def test_non_empty_log_dir_aborts_without_clean(env, tmp_path) -> None:
         ))
 
 
+def test_clean_does_not_rmtree_sibling_dirs(env, tmp_path) -> None:
+    """Foot-gun guard: --clean must NOT rmtree sibling directories.
+
+    Scenario: user sets log_dir to a PARENT of multiple task-set collections.
+    The OLD code did `shutil.rmtree(child)` on every subdir under log_dir,
+    losing all non-jsonl artifacts in siblings. The new code only deletes
+    *.jsonl files and rmdirs empty dirs — so non-jsonl artifacts survive
+    and the sibling directory itself survives.
+    """
+    log_dir = tmp_path / "data" / "raw"
+    log_dir.mkdir(parents=True)
+    (log_dir / "old.jsonl").write_text('{"x": 1}\n')
+    # A sibling directory with a non-jsonl artifact — MUST survive --clean.
+    sibling = log_dir / "swebench-lite"
+    sibling.mkdir()
+    (sibling / "README.md").write_text("notes from prior run")
+
+    _patch_loader_and_runner(env, n_tasks=1, status_for=lambda i, k: "ok")
+
+    # We don't care what the run returns; we care about filesystem side-effects.
+    try:
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=log_dir,
+            budget_usd=1000,
+            clean=True,
+            max_initial_failed_attempts=999,
+            allow_low_jsonl_success_ratio=True,
+        ))
+    except SystemExit:
+        pass  # ratio gate may fire; doesn't matter for this assertion
+
+    # The directly-located stale jsonl IS removed
+    assert not (log_dir / "old.jsonl").exists()
+    # The sibling dir and its NON-jsonl artifacts MUST survive (old code's
+    # shutil.rmtree would have nuked these).
+    assert sibling.exists(), "sibling dir was rmtree'd — foot-gun re-introduced!"
+    assert (sibling / "README.md").exists()
+
+
 def test_non_empty_log_dir_cleaned_with_flag(env, tmp_path) -> None:
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
@@ -181,24 +222,23 @@ def test_num_rollouts_multiplies(env, tmp_path) -> None:
     assert rollouts_seen == [0, 1, 2, 3]
 
 
-def test_launch_error_aborts_remaining(env, tmp_path) -> None:
-    """First task returns 'launch_error' → remaining tasks must be skipped."""
+def test_launch_error_aborts_with_exit_4(env, tmp_path) -> None:
+    """First task returns 'launch_error' → batch aborts AND exits non-zero."""
     def status_for(i, k):
         return "launch_error" if i == 0 else "ok"
 
-    log = _patch_loader_and_runner(env, n_tasks=50, status_for=status_for)
+    _patch_loader_and_runner(env, n_tasks=50, status_for=status_for)
 
-    tracker, stats = asyncio.run(collect_batch.collect(
-        task_set="swebench-lite",
-        num_rollouts=1,
-        concurrency=1,  # serial to make the abort deterministic
-        log_dir=tmp_path / "logs",
-        budget_usd=1000,
-        max_initial_failed_attempts=999,
-    ))
-    # Task 0 ran and failed; tasks 1..49 should have been skipped.
-    assert stats.failed >= 1
-    assert stats.over_budget_skipped >= 49 - 1  # at least most are skipped
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1,
+            concurrency=1,  # serial to make the abort deterministic
+            log_dir=tmp_path / "logs",
+            budget_usd=1000,
+            max_initial_failed_attempts=999,
+        ))
+    assert exc.value.code == 4
 
 
 def test_budget_exceeded_skips_remaining(env, tmp_path) -> None:
@@ -244,22 +284,20 @@ def test_timeout_does_not_abort_gather(env, tmp_path) -> None:
     assert stats.total == 5
 
 
-def test_max_initial_failed_attempts_aborts(env, tmp_path) -> None:
-    """If the first N rollout ATTEMPTS all fail before any success, abort."""
-    log = _patch_loader_and_runner(env, n_tasks=50, status_for=lambda i, k: "failed")
+def test_max_initial_failed_attempts_exits_4(env, tmp_path) -> None:
+    """If the first N rollout ATTEMPTS all fail, batch exits non-zero."""
+    _patch_loader_and_runner(env, n_tasks=50, status_for=lambda i, k: "failed")
 
-    tracker, stats = asyncio.run(collect_batch.collect(
-        task_set="swebench-lite",
-        num_rollouts=1,
-        concurrency=1,
-        log_dir=tmp_path / "logs",
-        budget_usd=1000,
-        max_initial_failed_attempts=3,
-    ))
-    # 3 failures should trigger abort; remaining tasks counted as skipped.
-    assert stats.failed >= 3
-    assert stats.over_budget_skipped > 0
-    assert stats.total == 50
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1,
+            concurrency=1,
+            log_dir=tmp_path / "logs",
+            budget_usd=1000,
+            max_initial_failed_attempts=3,
+        ))
+    assert exc.value.code == 4
 
 
 def test_one_success_disables_initial_failure_guard(env, tmp_path) -> None:

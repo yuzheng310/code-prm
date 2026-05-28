@@ -48,13 +48,17 @@ def collect_all(input_dirs: list[Path]) -> list[Trajectory]:
     return all_trajs
 
 
-def inspect_manifests(input_dirs: list[Path]) -> list[CheckResult]:
+def inspect_manifests(
+    input_dirs: list[Path],
+    allow_skipped: bool = False,
+) -> list[CheckResult]:
     """Read every `labeling_manifest.json` under each input dir, sanity-check.
 
     For each manifest:
     - print summary (when run, what model, K, task_prompt coverage achieved)
     - check that processed_files' outputs all exist on disk
-    - warn (not fail) if no manifest is present in a labeled dir
+    - check that skipped_files is empty (unless allow_skipped=True)
+    - fail if no manifest is present in a labeled dir
     """
     results: list[CheckResult] = []
     for d in input_dirs:
@@ -97,6 +101,27 @@ def inspect_manifests(input_dirs: list[Path]) -> list[CheckResult]:
                 else f"{len(missing_outputs)} output(s) missing (first: {missing_outputs[:3]})"
             ),
         ))
+        # Hard check on skipped_files unless explicitly allowed.
+        skipped = data.get("skipped_files", [])
+        if skipped and not allow_skipped:
+            sample = [s.get("input", "?") for s in skipped[:3]]
+            results.append(CheckResult(
+                name=f"no skipped files in {d.name}",
+                passed=False,
+                detail=(
+                    f"{len(skipped)} input file(s) were skipped by label_all "
+                    f"(first: {sample}). Re-run labeling on those inputs, "
+                    "or pass --allow_skipped_in_manifest if you accept "
+                    "incomplete labeling."
+                ),
+            ))
+        elif skipped and allow_skipped:
+            # Surface it but don't fail
+            results.append(CheckResult(
+                name=f"no skipped files in {d.name}",
+                passed=True,
+                detail=f"{len(skipped)} skipped — allowed via flag",
+            ))
     return results
 
 
@@ -301,6 +326,11 @@ def main() -> None:
         help="Skip Phase 1 exit-criteria checks. Use ONLY for debugging or "
              "for low-coverage pilots where you know the data isn't final.",
     )
+    p.add_argument(
+        "--allow_skipped_in_manifest", action="store_true",
+        help="Allow manifest.skipped_files to be non-empty (still reports it). "
+             "Default behavior is to FAIL if label_all skipped any input file.",
+    )
     args = p.parse_args()
 
     print(f"Reading from: {[str(d) for d in args.input_dirs]}")
@@ -313,7 +343,10 @@ def main() -> None:
 
     if not args.skip_checks:
         print("\nInspecting labeling manifests...")
-        manifest_results = inspect_manifests(args.input_dirs)
+        manifest_results = inspect_manifests(
+            args.input_dirs,
+            allow_skipped=args.allow_skipped_in_manifest,
+        )
 
         print("\nRunning Phase 1 exit-criteria checks...")
         criteria_results = run_all_checks(all_trajs)
