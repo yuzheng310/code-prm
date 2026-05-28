@@ -18,6 +18,7 @@
 set -euo pipefail
 
 : "${ANTHROPIC_API_KEY:?must be set in env}"
+# ANTHROPIC_BASE_URL is honored automatically by anthropic_client.py if set.
 
 RAW_DIR="data/raw/pilot"
 FORCE_DIR="data/raw/pilot_force_pass"
