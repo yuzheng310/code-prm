@@ -11,6 +11,11 @@ set -euo pipefail
 : "${ANTHROPIC_API_KEY:?must be set in env}"
 : "${TS_REPO_PATH:?must be set in .env or shell}"
 
+# China-network mitigation: use HuggingFace mirror unless user explicitly set
+# their own HF_ENDPOINT. AutoDL's academic accelerator can also be sourced
+# externally before invoking this script.
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+
 LOG_DIR="${CODE_PRM_LOG_DIR:-$PWD/data/raw/pilot}"
 mkdir -p "$LOG_DIR"
 
