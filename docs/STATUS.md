@@ -1,6 +1,6 @@
 # Code-PRM 当前工作状况
 
-最近更新:commit `b9360ae`(round 9 review 已完成,pilot 数据流水线已端到端跑通)
+最近更新:commit `445a94f`(加入 BigCodeBench 真实 grader,移除预算硬上限)
 
 ---
 
@@ -24,8 +24,10 @@ Phase 1 plan:`docs/superpowers/plans/2026-05-27-code-prm-phase1-foundation.md`
 | TS Agent | `yuzheng310/pi`(fork of earendil-works/pi) | hooks 系统干净,免侵入 |
 | LLM 后端 | DeepSeek Anthropic 兼容端点 | API key 限制,直连 Anthropic 403。`claude-*` 模型名自动映射到 `deepseek-v4-flash/pro` |
 | Collection 模型 | `claude-sonnet-4-5` → `deepseek-v4-flash` | 便宜的策略模型 |
-| **Judge 模型** | **`claude-opus-4-7` → `deepseek-v4-pro`** | **避免 self-evaluation 偏差**(judge 比 policy 强,Math-Shepherd 经典设置)。早期用 haiku→flash 时 mean 偏低(0.276,61% 全 0),换 opus→pro 期望 mean 上移 |
+| **Judge 模型** | **`claude-opus-4-7` → `deepseek-v4-pro`** | **避免 self-evaluation 偏差**(judge 比 policy 强,Math-Shepherd 经典设置) |
+| **Outcome 来源** | **trajectory_logger.ts 内置 BigCodeBench grader**(`agent_end` 时跑 `python <task.test>` 60s timeout) | 早期 outcome 默认 0 导致 100% 走 `outcome_zero_simplification` 路径,LLM-judge 从未被真实数据触发。grader 给出真实 pass/fail,outcome=1 才走 judge → step_label 才有意义 |
 | 数据语义 | **诚实命名**:`label_method` 区分 `llm_judge` / `outcome_zero_simplification` / 未来 `mc_rollout` / `ground_truth` | 防止下游报告写"MC labels"被戳穿 |
+| 预算控制 | **代码层不强制预算**(`--budget_usd 1000000` ≈ 无限);成本看 relay dashboard / `cost_aggregator` 后置统计 | Opus 节奏下 hard cap 会原子写回滚已完成工作;改成"花了再说"的策略 |
 
 ---
 
@@ -38,11 +40,12 @@ Phase 1 plan:`docs/superpowers/plans/2026-05-27-code-prm-phase1-foundation.md`
                               └─ pi 加载 ~/.pi/agent/extensions/trajectory_logger.ts
                                   └─ 写 $LOG_DIR/<task_type>_<date>.jsonl  ← raw trajectory
                                       
-raw jsonl ─→ Python label_all.py
+raw jsonl(已含真实 outcome,grader 跑过 BigCodeBench test)
+              ─→ Python label_all.py
                   ├─ 每条 trajectory:
-                  │   ├─ outcome=0 → step_label=0.0 (no API)
-                  │   └─ outcome=1 → K=4 次调 Haiku(via DeepSeek)judge
-                  ├─ stamp label_method
+                  │   ├─ outcome=0 → step_label=0.0 (no API,simplification)
+                  │   └─ outcome=1 → K=4 次调 Opus → V4-Pro judge
+                  ├─ stamp label_method ∈ {"outcome_zero_simplification","llm_judge"}
                   └─ 原子写 $LABEL_DIR/<file>.jsonl + labeling_manifest.json
 
 labeled jsonl ─→ scripts/30_assemble_dataset.py
@@ -61,35 +64,49 @@ labeled jsonl ─→ scripts/30_assemble_dataset.py
 | 代码骨架(Phase 1) | ✅ 18 Python files, 6 shell scripts, 1 TS extension |
 | 单元测试 | ✅ ~110 tests,语法/逻辑全过 |
 | Lab box 环境 | ✅ AutoDL vGPU-48GB, Node 20, pi 已 build, conda env 完整 |
-| pi extension(trajectory_logger.ts) | ✅ 字段全部对齐 pi 真实 API,pilot 数据 schema 正确 |
+| pi extension(trajectory_logger.ts) | ✅ 字段全部对齐 pi 真实 API,**含 BigCodeBench grader** |
 | Trajectory collection 流水线 | ✅ 10 任务 pilot 跑通,token_usage / tool_result / thought 全部捕获 |
-| LLM-judge labeler 流水线 | ⚠️ 代码完成,但 **judge 路径在真实数据上的非退化分布尚未验证**(下一步) |
+| 真实 outcome 标签 | ⚠️ grader 代码完成,**真实分布尚未验证(下一步:重跑 pilot 看 outcome 分布)** |
+| LLM-judge labeler 流水线 | ⚠️ 代码完成,verification 等真实 outcome 数据(force-pass 测试已被废弃,逻辑见 commit `445a94f`) |
 | 全量数据采集 | ❌ 未开始(~$80,~8h) |
 | 全量 labeling | ❌ 未开始(~$60,~12h) |
 | Dataset assembly + Phase 1 报告 | ❌ 未开始 |
 
 ---
 
-## 立即下一步:验证 judge 真的工作
+## 立即下一步:重跑 pilot,看真实 outcome 分布
 
 ```bash
 cd ~/code-prm
 git pull origin main
-bash scripts/07_label_pilot_judge.sh
+
+# pilot 现在会真跑 BigCodeBench 测试 → 真实 outcome
+bash scripts/05_collect_pilot.sh
+
+# 看 outcome 分布
+python -c "
+import json
+from collections import Counter
+import glob
+outcomes = Counter()
+for f in glob.glob('data/raw/pilot/*.jsonl'):
+    if '.ipynb_checkpoints' in f: continue
+    for line in open(f):
+        t = json.loads(line)
+        outcomes[t['outcome']] += 1
+print('outcome distribution:', dict(outcomes))
+"
 ```
 
-这一步用 force-pass(把 pilot 数据 outcome 改为 1)走 judge 分支,验证:
-- DeepSeek 真能调通(URL / API key / 模型映射正确)
-- 标签分布 non-degenerate(`mean ∈ [0.2, 0.8]`,至少 2 个 distinct value)
+**成功标准**:`outcome distribution: {0: ~6, 1: ~4}`(或类似的 30-60% pass 率)。
 
-**成本:~$0.5,~5-10 分钟。**
+完全没有 outcome=1 → 说明 grader 没工作 / agent 写错路径 / 任务太难。贴 raw 数据 stderr_tail 排查。
 
-**成功标准**:输出最后看到 `→ HEALTHY: True`
-
-如果 `HEALTHY: False`(全 0 或全 1),需要调:
-- judge prompt(`src/labeler/step_labeler.py:_build_continuation_prompt`)
-- K 值(默认 4,可升到 8)
-- 模型(可强制 `deepseek-v4-pro` 试更强 judge)
+**outcome 分布正常后**:
+```bash
+bash scripts/06_label_pilot.sh
+# 这次会真正调 Opus judge,在 outcome=1 trajectories 上产生有意义的 step_label
+```
 
 ---
 
@@ -145,9 +162,9 @@ git tag phase1-complete && git push --tags
 | `src/eval/swebench_runner.py` | TS 子进程启动器 |
 | `src/eval/collect_batch.py` | 异步并发采集驱动 |
 | `src/utils/cost_aggregator.py` | 从 trajectory.token_usage 算真实成本 |
-| `scripts/05_collect_pilot.sh` | 10-task pilot |
-| `scripts/06_label_pilot.sh` | labeling pilot(outcome=0 → simplification path) |
-| `scripts/07_label_pilot_judge.sh` | force-pass pilot(验证 judge 路径,**下一步要跑这个**) |
+| `scripts/05_collect_pilot.sh` | 10-task pilot(**现在含 BigCodeBench grader**) |
+| `scripts/06_label_pilot.sh` | labeling pilot |
+| `scripts/07_label_pilot_judge.sh` | force-pass pilot(已废弃 — grader 上线后 force-pass 测试无意义,代码留作参考) |
 | `scripts/11_collect_bigcodebench.sh` | 全量采集 |
 | `scripts/20_label_steps.sh` | 全量 labeling |
 | `scripts/30_assemble_dataset.py` | 组装 + 6 hard checks |
@@ -177,9 +194,10 @@ git tag phase1-complete && git push --tags
 
 ---
 
-## 下一步只看这两条
+## 下一步只看这三条
 
-1. **跑 `bash scripts/07_label_pilot_judge.sh`**,看 `→ HEALTHY: True`
-2. **OK 后跑 `bash scripts/11_collect_bigcodebench.sh`(tmux 后台)**
+1. **`bash scripts/05_collect_pilot.sh`** — 看 outcome 分布是不是 30-60% pass(不再全 0)
+2. **`bash scripts/06_label_pilot.sh`** — 真实 outcome 触发 judge,看 step_label 分布健康
+3. **OK 后 `bash scripts/11_collect_bigcodebench.sh`(tmux 后台)** — 全量 1200 trajectory
 
 之后顺着 "全部跑通后的剩余命令" 章节走。
