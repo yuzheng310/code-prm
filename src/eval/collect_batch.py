@@ -199,10 +199,19 @@ async def collect(
                 stats.add_skipped()
                 return
             run_id = str(uuid.uuid4())
+            task_id_str = task.get("instance_id", task.get("task_id", "?"))
             extra_env = {
                 "CODE_PRM_ROLLOUT_ID": str(k),
                 "CODE_PRM_RUN_ID": run_id,
             }
+            # Progress: announce task START so user knows pi is being launched.
+            t_start = time.monotonic()
+            print(
+                f"\n[start] task={task_id_str} rollout={k} "
+                f"(progress so far: ok={stats.succeeded} fail={stats.failed} "
+                f"timeout={stats.timed_out} skip={stats.over_budget_skipped})",
+                flush=True,
+            )
             loop = asyncio.get_running_loop()
             try:
                 runner = partial(
@@ -228,12 +237,22 @@ async def collect(
                     runner,
                 )
             except Exception as exc:  # noqa: BLE001 — log and continue
-                print(f"  [crash] task={task.get('instance_id', task.get('task_id', '?'))} "
-                      f"rollout={k} err={exc!r}")
+                elapsed = time.monotonic() - t_start
+                print(
+                    f"[crash] task={task_id_str} rollout={k} "
+                    f"elapsed={elapsed:.1f}s err={exc!r}",
+                    flush=True,
+                )
                 stats.add_crash()
                 # Crash before any success is suspicious — count as initial failure too.
                 _maybe_set_abort_on_early_failures()
                 return
+            elapsed = time.monotonic() - t_start
+            print(
+                f"[ end ] task={task_id_str} rollout={k} status={status} "
+                f"elapsed={elapsed:.1f}s",
+                flush=True,
+            )
 
             if status == "ok":
                 stats.add_success()

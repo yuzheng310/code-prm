@@ -34,7 +34,8 @@ python -m src.eval.collect_batch \
     --timeout_sec 300 \
     --log_dir "$LOG_DIR" \
     --budget_usd 10 \
-    --clean
+    --clean \
+    --stream_output
 
 echo ""
 echo "=== Pilot done. Inspect: ==="
