@@ -162,7 +162,48 @@ Violating this convention will make the Python collector either:
 (a) silently swallow agent crashes as task failures, or
 (b) abort the whole batch on benign task failures.
 
-## Sample reference implementation
+## Reference implementation
 
-See `<TS_REPO>/src/hooks/trajectory_logger.ts` for the recommended Node
-implementation (created in Task 9 of the Phase 1 plan).
+A working implementation against the **pi** agent harness
+(github.com/earendil-works/pi) lives in this repo at:
+
+    src/collector/trajectory_logger.ts
+
+It is loaded by pi via its extension system (jiti — no compilation needed).
+Install:
+
+```bash
+# Global (recommended)
+ln -sf $PWD/src/collector/trajectory_logger.ts \
+       ~/.pi/agent/extensions/trajectory_logger.ts
+
+# OR project-local (only loaded in pi runs within a given project)
+ln -sf $PWD/src/collector/trajectory_logger.ts \
+       <pi-project-root>/.pi/extensions/trajectory_logger.ts
+```
+
+A bootstrap script automates this:
+
+    bash scripts/01_setup_pi.sh
+
+The reference implementation:
+- Activates only when `CODE_PRM_LOG_DIR` is set
+- Hooks `session_start` (captures task_id/task_prompt/base_commit),
+  `tool_call` + `tool_result` (records each step with cumulative thought),
+  `message_end` (accumulates token_usage),
+  `agent_end` (runs test command if set, captures final diff, appends jsonl),
+  `session_shutdown` (best-effort flush)
+- Honors `CODE_PRM_TEST_COMMAND` env to run a shell command as the grader
+- Honors `CODE_PRM_ROLLOUT_ID` / `CODE_PRM_RUN_ID` from the Python collector
+
+## Adapting to a different TS codeAgent
+
+The reference depends on pi's specific hook names (`tool_call`, `tool_result`,
+`message_end`, `agent_end`). If you wire this up to a non-pi codeAgent:
+
+1. Find the equivalent hook points in your agent's lifecycle.
+2. Preserve the env-var contract (CODE_PRM_*).
+3. Preserve the jsonl output path convention (`$LOG_DIR/<task_type>_<YYYYMMDD>.jsonl`).
+4. Preserve the schema (see `trajectory_schema.py`).
+5. Run `pytest tests/test_trajectory_schema.py` on a sample of your output
+   before scaling up.

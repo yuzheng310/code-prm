@@ -111,15 +111,26 @@ def run_task_with_codeagent(
     if extra_env:
         env.update(extra_env)
 
-    # TODO(user): Adjust this command to match your actual codeAgent CLI.
-    # The placeholder assumes: `node <ts_repo>/dist/cli.js run --task-id X --task-type <T>`
-    # If your CLI differs, change the argv here.
+    # The default target is pi (github.com/earendil-works/pi) — pi's CLI is
+    # `node <pi-coding-agent>/dist/cli.js`. Set TS_REPO_PATH to point at
+    # `<pi-clone>/packages/coding-agent`. For a different agent, override
+    # this argv construction; the rest of the pipeline only depends on the
+    # subprocess writing a trajectory line to $CODE_PRM_LOG_DIR per
+    # ts_logger_spec.md.
+    #
+    # The first arg after dist/cli.js is the prompt for pi. We pass the
+    # problem statement (or BigCodeBench prompt) extracted in the env so the
+    # agent has something to solve.
+    problem_text = (
+        task.get("problem_statement")
+        or task.get("prompt")
+        or task.get("instruct_prompt")
+        or f"Solve task {task_id}"
+    )
     cmd = [
         "node",
         str(ts_repo / "dist" / "cli.js"),
-        "run",
-        "--task-id", task_id,
-        "--task-type", task_type,
+        "-p", problem_text,           # pi: -p / --prompt for non-interactive single prompt
     ]
 
     try:

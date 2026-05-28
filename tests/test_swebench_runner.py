@@ -21,9 +21,9 @@ def _bigcode_task() -> dict:
     return {"task_id": "BigCodeBench/0", "prompt": "do thing"}
 
 
-def test_uses_instance_id_for_swebench(tmp_path: Path, monkeypatch) -> None:
-    """SWE-bench task is dispatched with --task-type swe-bench-lite."""
-    captured = {}
+def test_uses_pi_cli_with_prompt_for_swebench(tmp_path: Path, monkeypatch) -> None:
+    """SWE-bench task is dispatched as `node cli.js -p <problem_statement>`."""
+    captured: dict = {}
 
     def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None):
         captured["cmd"] = cmd
@@ -35,19 +35,24 @@ def test_uses_instance_id_for_swebench(tmp_path: Path, monkeypatch) -> None:
         _swe_task(), tmp_path / "ts_repo", tmp_path / "logs",
     )
     assert status == "ok"
-    assert "--task-id" in captured["cmd"]
-    idx = captured["cmd"].index("--task-id")
-    assert captured["cmd"][idx + 1] == "django__django-1"
-    type_idx = captured["cmd"].index("--task-type")
-    assert captured["cmd"][type_idx + 1] == "swe-bench-lite"
+    # pi CLI: node <cli.js> -p "<prompt>"
+    assert captured["cmd"][0] == "node"
+    assert "-p" in captured["cmd"]
+    p_idx = captured["cmd"].index("-p")
+    assert captured["cmd"][p_idx + 1] == "fix bug"  # the problem_statement
+    # The env still carries the task_type so the extension can stamp it
+    assert captured["env"]["CODE_PRM_TASK_TYPE"] == "swe-bench-lite"
+    # And the full task payload so the extension can extract task_prompt
+    assert "fix bug" in captured["env"]["CODE_PRM_TASK_JSON"]
 
 
-def test_uses_task_id_for_bigcodebench(tmp_path: Path, monkeypatch) -> None:
-    """BigCodeBench task is dispatched with --task-type bigcodebench-hard."""
-    captured = {}
+def test_uses_pi_cli_for_bigcodebench(tmp_path: Path, monkeypatch) -> None:
+    """BigCodeBench task: env still tagged bigcodebench-hard."""
+    captured: dict = {}
 
     def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None):
         captured["cmd"] = cmd
+        captured["env"] = env
         return MagicMock(returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -55,10 +60,28 @@ def test_uses_task_id_for_bigcodebench(tmp_path: Path, monkeypatch) -> None:
         _bigcode_task(), tmp_path / "ts_repo", tmp_path / "logs",
     )
     assert status == "ok"
-    idx = captured["cmd"].index("--task-id")
-    assert captured["cmd"][idx + 1] == "BigCodeBench/0"
-    type_idx = captured["cmd"].index("--task-type")
-    assert captured["cmd"][type_idx + 1] == "bigcodebench-hard"
+    p_idx = captured["cmd"].index("-p")
+    assert captured["cmd"][p_idx + 1] == "do thing"  # the prompt
+    assert captured["env"]["CODE_PRM_TASK_TYPE"] == "bigcodebench-hard"
+
+
+def test_falls_back_to_placeholder_prompt_when_missing(tmp_path: Path, monkeypatch) -> None:
+    """If task dict has neither problem_statement nor prompt, fall back to a
+    'Solve task X' placeholder rather than crashing."""
+    captured: dict = {}
+
+    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None):
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    swebench_runner.run_task_with_codeagent(
+        {"instance_id": "foo-1"},  # no problem_statement
+        tmp_path / "ts_repo",
+        tmp_path / "logs",
+    )
+    p_idx = captured["cmd"].index("-p")
+    assert "Solve task foo-1" in captured["cmd"][p_idx + 1]
 
 
 def test_returns_failed_on_nonzero_exit(tmp_path: Path, monkeypatch) -> None:
