@@ -97,6 +97,7 @@ async def collect(
     policy_model: str = "claude-sonnet-4-5",
     timeout_sec: int = 600,
     limit: int | None = None,
+    max_initial_failures: int = 5,
 ) -> tuple[CostTracker, CollectionStats]:
     """Drive end-to-end collection. Returns (tracker, stats).
 
@@ -136,7 +137,7 @@ async def collect(
     print("NOTE: real cost will be in trajectory token_usage; aggregate afterward.")
 
     # Sentinel that, once set, makes remaining rollouts skip cheaply.
-    abort_flag = {"set": False}
+    abort_flag = {"set": False, "reason": ""}
 
     async def one_run(task: dict[str, Any], k: int) -> None:
         async with sem:
@@ -166,12 +167,15 @@ async def collect(
                 print(f"  [crash] task={task.get('instance_id', task.get('task_id', '?'))} "
                       f"rollout={k} err={exc!r}")
                 stats.add_crash()
+                # Crash before any success is suspicious — count as initial failure too.
+                _maybe_set_abort_on_early_failures()
                 return
 
             if status == "ok":
                 stats.add_success()
             elif status == "timeout":
                 stats.add_timeout()
+                _maybe_set_abort_on_early_failures()
             elif status == "launch_error":
                 # Config bug. Don't burn money on remaining tasks.
                 print(
@@ -181,15 +185,36 @@ async def collect(
                 )
                 stats.add_failure()
                 abort_flag["set"] = True
+                abort_flag["reason"] = "launch_error"
                 return
             else:  # "failed"
                 stats.add_failure()
+                _maybe_set_abort_on_early_failures()
 
             # Pessimistic estimate; real cost is in trajectory.token_usage.
             tracker.add(
                 policy_model,
                 input_tokens=EST_INPUT_TOK_PER_TRAJECTORY,
                 output_tokens=EST_OUTPUT_TOK_PER_TRAJECTORY,
+            )
+
+    def _maybe_set_abort_on_early_failures() -> None:
+        """If the FIRST max_initial_failures attempts all failed (zero successes),
+        the config is probably broken — abort to avoid burning the whole batch."""
+        if abort_flag["set"]:
+            return
+        if stats.succeeded > 0:
+            return  # Once we have any success, this guard never fires.
+        initial_failures = stats.failed + stats.timed_out + stats.crashed
+        if initial_failures >= max_initial_failures:
+            abort_flag["set"] = True
+            abort_flag["reason"] = "max_initial_failures"
+            print(
+                f"\n[!] First {initial_failures} tasks all failed before any "
+                "succeeded. ABORTING batch — likely a TS-side config bug "
+                "(missing deps, agent crash on init, wrong CLI args).\n"
+                "    Investigate one task manually:\n"
+                f"      node $TS_REPO_PATH/dist/cli.js run --task-id <id> --task-type <T>\n"
             )
 
     with Progress() as prog:
@@ -238,6 +263,11 @@ def main() -> None:
         "--timeout_sec", type=int, default=600,
         help="Per-task subprocess timeout (default 10 min).",
     )
+    p.add_argument(
+        "--max_initial_failures", type=int, default=5,
+        help="If first N tasks all fail before any success, abort the batch. "
+             "Catches config bugs early instead of burning the whole budget.",
+    )
     args = p.parse_args()
 
     asyncio.run(
@@ -250,6 +280,7 @@ def main() -> None:
             policy_model=args.policy_model,
             timeout_sec=args.timeout_sec,
             limit=args.limit,
+            max_initial_failures=args.max_initial_failures,
         )
     )
 

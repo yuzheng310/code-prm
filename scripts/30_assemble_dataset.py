@@ -4,7 +4,9 @@
 Reads from `data/labeled/{swebench-lite,bigcodebench-hard}/*.jsonl`,
 deterministically shuffles, and writes to `data/code-trajectory-2.4k/`.
 
-Reports per-split outcome balance to surface any drift between splits.
+Before writing the final dataset, runs HARD CHECKS against Phase 1 exit
+criteria. By default these fail fast — use `--skip_checks` to bypass
+(useful for debugging or for the pilot stage where coverage is low).
 
 Run from project root:
     python scripts/30_assemble_dataset.py
@@ -14,6 +16,7 @@ import argparse
 import random
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 # Allow running as a script from project root
@@ -23,8 +26,14 @@ from src.labeler.trajectory_schema import Trajectory  # noqa: E402
 from src.utils.jsonl_io import read_trajectories, write_trajectories  # noqa: E402
 
 
+# --- collection ---
+
+
 def collect_all(input_dirs: list[Path]) -> list[Trajectory]:
-    """Read every *.jsonl under each input dir (recursive) and concatenate."""
+    """Read every *.jsonl under each input dir (recursive) and concatenate.
+
+    Excludes any file named `labeling_manifest.json` (not a jsonl).
+    """
     all_trajs: list[Trajectory] = []
     for d in input_dirs:
         if not d.exists():
@@ -70,6 +79,120 @@ def report(split_name: str, data: list[Trajectory]) -> None:
     )
 
 
+# --- exit-criteria checks ---
+
+
+@dataclass
+class CheckResult:
+    name: str
+    passed: bool
+    detail: str
+
+
+def check_label_method_set(trajectories: list[Trajectory]) -> CheckResult:
+    missing = [t.task_id for t in trajectories if t.label_method is None]
+    return CheckResult(
+        name="label_method set on every trajectory",
+        passed=len(missing) == 0,
+        detail=(
+            "all trajectories tagged"
+            if not missing
+            else f"{len(missing)} trajectories missing label_method "
+                 f"(first: {missing[:3]})"
+        ),
+    )
+
+
+def check_task_prompt_coverage(
+    trajectories: list[Trajectory],
+    threshold: float = 0.95,
+) -> CheckResult:
+    outcome_one = [t for t in trajectories if t.outcome == 1]
+    with_prompt = [
+        t for t in outcome_one if t.task_prompt and t.task_prompt.strip()
+    ]
+    coverage = len(with_prompt) / max(len(outcome_one), 1)
+    return CheckResult(
+        name=f"task_prompt coverage on outcome=1 >= {threshold:.0%}",
+        passed=coverage >= threshold,
+        detail=f"{len(with_prompt)}/{len(outcome_one)} = {coverage:.1%}",
+    )
+
+
+def check_step_label_coverage(
+    trajectories: list[Trajectory],
+    threshold: float = 0.80,
+) -> CheckResult:
+    n_tool_steps = 0
+    n_labeled = 0
+    for t in trajectories:
+        if t.outcome != 1:
+            continue
+        for s in t.trajectory:
+            if s.tool is not None:
+                n_tool_steps += 1
+                if s.step_label is not None:
+                    n_labeled += 1
+    coverage = n_labeled / max(n_tool_steps, 1)
+    return CheckResult(
+        name=f"step_label coverage on outcome=1 tool steps >= {threshold:.0%}",
+        passed=coverage >= threshold,
+        detail=f"{n_labeled}/{n_tool_steps} = {coverage:.1%}",
+    )
+
+
+def check_token_usage_coverage(
+    trajectories: list[Trajectory],
+    threshold: float = 0.80,
+) -> CheckResult:
+    with_usage = [t for t in trajectories if t.token_usage is not None]
+    coverage = len(with_usage) / max(len(trajectories), 1)
+    return CheckResult(
+        name=f"token_usage coverage >= {threshold:.0%}",
+        passed=coverage >= threshold,
+        detail=f"{len(with_usage)}/{len(trajectories)} = {coverage:.1%}",
+    )
+
+
+def check_step_label_distribution_non_degenerate(
+    trajectories: list[Trajectory],
+    low: float = 0.2,
+    high: float = 0.8,
+) -> CheckResult:
+    labels: list[float] = []
+    for t in trajectories:
+        if t.label_method != "llm_judge":
+            continue
+        for s in t.trajectory:
+            if s.step_label is not None:
+                labels.append(s.step_label)
+    if not labels:
+        return CheckResult(
+            name=f"step_label mean in [{low:.1f}, {high:.1f}]",
+            passed=False,
+            detail="no llm_judge step labels found",
+        )
+    mean = sum(labels) / len(labels)
+    return CheckResult(
+        name=f"step_label mean in [{low:.1f}, {high:.1f}]",
+        passed=low <= mean <= high,
+        detail=f"mean={mean:.3f} over {len(labels)} judge-labeled steps",
+    )
+
+
+def run_all_checks(trajectories: list[Trajectory]) -> list[CheckResult]:
+    return [
+        check_label_method_set(trajectories),
+        check_task_prompt_coverage(trajectories, threshold=0.95),
+        check_step_label_coverage(trajectories, threshold=0.80),
+        check_token_usage_coverage(trajectories, threshold=0.80),
+        check_step_label_distribution_non_degenerate(trajectories),
+    ]
+
+
+# --- main ---
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -90,6 +213,11 @@ def main() -> None:
     p.add_argument("--val_frac", type=float, default=0.10)
     p.add_argument("--test_frac", type=float, default=0.10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--skip_checks", action="store_true",
+        help="Skip Phase 1 exit-criteria checks. Use ONLY for debugging or "
+             "for low-coverage pilots where you know the data isn't final.",
+    )
     args = p.parse_args()
 
     print(f"Reading from: {[str(d) for d in args.input_dirs]}")
@@ -99,6 +227,24 @@ def main() -> None:
     if not all_trajs:
         print("ERROR: no trajectories found. Did labeling run?")
         sys.exit(1)
+
+    if not args.skip_checks:
+        print("\nRunning Phase 1 exit-criteria checks...")
+        results = run_all_checks(all_trajs)
+        for r in results:
+            mark = "PASS" if r.passed else "FAIL"
+            print(f"  [{mark}] {r.name}: {r.detail}")
+        if any(not r.passed for r in results):
+            print(
+                "\n[FATAL] One or more exit-criteria checks failed.\n"
+                "Fix the upstream pipeline (collection/labeling) and re-run.\n"
+                "Or pass --skip_checks to assemble anyway (NOT recommended\n"
+                "for final Phase 1 dataset).\n"
+            )
+            sys.exit(2)
+        print("All checks passed.\n")
+    else:
+        print("[!] --skip_checks set; not validating exit criteria.\n")
 
     train, val, test = split(all_trajs, args.val_frac, args.test_frac, args.seed)
 

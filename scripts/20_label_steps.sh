@@ -12,10 +12,12 @@ python -m src.labeler.label_all \
     --input_dir data/raw/swebench-lite \
     --output_dir data/labeled/swebench-lite \
     --budget_usd 80 \
-    --K 4
+    --K 4 \
+    --clean
 
 python -m src.labeler.label_all \
     --input_dir data/raw/bigcodebench-hard \
     --output_dir data/labeled/bigcodebench-hard \
     --budget_usd 60 \
-    --K 4
+    --K 4 \
+    --clean
