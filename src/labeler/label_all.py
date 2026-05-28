@@ -60,6 +60,20 @@ def task_prompt_coverage(files: list[Path]) -> tuple[int, int, int]:
     return n_outcome_one, n_with_prompt, n_total
 
 
+def _is_hidden_artifact(path: Path, root: Path) -> bool:
+    """True if `path` lives under a hidden directory beneath `root`.
+
+    Filters out Jupyter checkpoints (.ipynb_checkpoints), editor swap
+    files (.vscode, .idea), and other tool artifacts that would otherwise
+    bloat the labeling run (and pollute label_method breakdowns).
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in rel.parts[:-1])
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input_dir", type=Path, required=True)
@@ -97,7 +111,15 @@ def main() -> None:
     # --- All preflights run BEFORE we touch the Anthropic API key. This lets
     # ---  CI / lab-box smoke runs sanity-check guards without needing a real
     # ---  API key in env.
-    files = sorted(args.input_dir.rglob("*.jsonl"))
+    files_all = sorted(args.input_dir.rglob("*.jsonl"))
+    files = [f for f in files_all if not _is_hidden_artifact(f, args.input_dir)]
+    skipped_hidden = [f for f in files_all if _is_hidden_artifact(f, args.input_dir)]
+    if skipped_hidden:
+        print(
+            f"[!] Skipping {len(skipped_hidden)} jsonl file(s) under hidden "
+            f"directories (Jupyter/editor artifacts): "
+            f"{[str(p) for p in skipped_hidden[:3]]}"
+        )
     if not files:
         print(f"WARN: no *.jsonl files (recursive) in {args.input_dir}")
         return
