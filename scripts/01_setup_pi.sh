@@ -14,6 +14,36 @@ PI_REPO_URL="${PI_REPO_URL:-git@github.com:yuzheng310/pi.git}"
 PI_INSTALL_DIR="${PI_INSTALL_DIR:-$HOME/pi}"
 EXTENSION_SRC="$PROJECT_DIR/src/collector/trajectory_logger.ts"
 
+echo "==> [0/4] Checking Node.js..."
+if ! command -v node &>/dev/null; then
+    echo "ERROR: 'node' not found on PATH."
+    echo ""
+    echo "Install Node.js 20+ first. On Ubuntu / AutoDL:"
+    echo ""
+    echo "    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
+    echo "    apt-get install -y nodejs"
+    echo ""
+    echo "Or via nvm (works behind tighter firewalls):"
+    echo ""
+    echo "    curl -o- https://gh-proxy.com/https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"
+    echo "    source ~/.bashrc && nvm install 20 && nvm use 20"
+    echo ""
+    exit 1
+fi
+NODE_VERSION=$(node --version | sed 's/^v//')
+NODE_MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
+if [ "$NODE_MAJOR" -lt 20 ]; then
+    echo "WARN: Node $NODE_VERSION detected. Pi requires Node 20+."
+    echo "      Consider upgrading; continuing for now."
+fi
+echo "    ✓ node $NODE_VERSION"
+
+if ! command -v npm &>/dev/null; then
+    echo "ERROR: 'npm' not found (came with Node 20+ via NodeSource normally)."
+    exit 1
+fi
+echo "    ✓ npm $(npm --version)"
+
 echo "==> [1/4] Cloning pi to $PI_INSTALL_DIR..."
 if [ ! -d "$PI_INSTALL_DIR" ]; then
     git clone "$PI_REPO_URL" "$PI_INSTALL_DIR"
