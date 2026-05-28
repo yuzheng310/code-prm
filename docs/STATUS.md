@@ -152,6 +152,119 @@ git tag phase1-complete && git push --tags
 
 ---
 
+## 运行环境
+
+### 硬件 / 镜像(AutoDL 租用)
+
+| 项 | 配置 |
+|---|---|
+| GPU | `vGPU-48GB-350W ×1`(L40S/RTX 6000 Ada 同档,48 GB VRAM) |
+| CPU | 12 核 Xeon Platinum 8260 |
+| 内存 | 90 GB |
+| 系统盘 | 30 GB |
+| 数据盘 | 100 GB(50 free + 50 扩容) |
+| 镜像 | `PyTorch / 2.5.1 / 3.12(ubuntu22.04) / 12.4` |
+| 计费 | 按量计费 ¥1.78/时;**不用时关机**(数据盘 ¥0.33/天) |
+
+### 软件栈(lab box 上)
+
+| 软件 | 版本 | 安装方式 |
+|---|---|---|
+| Python | 3.12 | 镜像自带 + miniconda |
+| PyTorch | 2.5.1 + CUDA 12.4 | 镜像自带 |
+| Node.js | 20.x | `nodesource setup_20.x` + `apt install -y nodejs` |
+| npm | 10.x | 随 Node 装 |
+| git-lfs | 系统包 | `apt install -y git-lfs`(给 PRM800K 用) |
+| Canvas 系统库 | system | `apt install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev libpixman-1-dev`(pi 的 native dep) |
+| tmux | system | 长跑任务必备 |
+
+### 关键 Python 依赖(`pyproject.toml`)
+
+```
+torch>=2.4,<2.6
+transformers>=4.45,<4.50
+peft>=0.13
+anthropic>=0.39
+pydantic>=2.9
+datasets>=3.0
+pytest>=8.0
+tenacity>=9.0   # API 重试
+fastapi>=0.115  # PRM service (Phase 3)
+rich>=13.0      # 进度条
+```
+
+### pi(TS agent)
+
+- Fork:`git@github.com:yuzheng310/pi.git` clone 到 `~/pi`
+- Build:`npm ci && npm run build`(canvas 编译比较慢,~5 min)
+- CLI 入口:`~/pi/packages/coding-agent/dist/cli.js`
+- Extension 软链:`~/.pi/agent/extensions/trajectory_logger.ts` → `~/code-prm/src/collector/trajectory_logger.ts`
+
+### 环境变量(脚本默认值,可 override)
+
+| Env var | 默认值 | 用途 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | **必须自己设** | DeepSeek API key(也用作 Anthropic 兼容请求的 key) |
+| `ANTHROPIC_BASE_URL` | `https://api.deepseek.com/anthropic` | 中转 URL,直接 Anthropic 国内 403 |
+| `HF_ENDPOINT` | `https://hf-mirror.com` | HuggingFace 国内不通,走镜像 |
+| `TS_REPO_PATH` | **必须自己设** = `$HOME/pi/packages/coding-agent` | swebench_runner 找 `dist/cli.js` 用 |
+| `CODE_PRM_LOG_DIR` | 脚本自动设 | trajectory_logger 写 jsonl 的目录 |
+| `CODE_PRM_ROLLOUT_ID` / `CODE_PRM_RUN_ID` | 脚本自动设 | extension stamp 用 |
+| `CODE_PRM_TASK_JSON` / `CODE_PRM_TASK_TYPE` | 脚本自动设 | extension 解析任务用 |
+
+写到 `~/.bashrc` 永久化:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+export TS_REPO_PATH=$HOME/pi/packages/coding-agent
+# 其他两个有默认值,但也可以显式 export
+```
+
+### 网络代理
+
+- **GitHub** 国内拉慢 → 用 `source /etc/network_turbo`(AutoDL 学术加速)或 `gh-proxy.com` / `ghfast.top` 前缀
+- **HuggingFace** 直连不通 → 走 `hf-mirror.com`(脚本默认)
+- **Anthropic API** 直连 403 → 走 DeepSeek 兼容端点(脚本默认)
+- **npm** 慢 → `npm config set registry https://registry.npmmirror.com`
+
+### 文件系统布局(lab box `/root` 下)
+
+```
+~/code-prm/                        # 本项目(git@github.com:yuzheng310/code-prm.git)
+├── src/, scripts/, tests/, docs/  # 工程代码
+├── data/                          # gitignored
+│   ├── raw/pilot/                 # 10-task pilot raw jsonl
+│   ├── raw/swebench-lite/         # ~~已废弃(SWE-bench 跳过)~~
+│   ├── raw/bigcodebench-hard/     # 全量采集落地
+│   ├── labeled/                   # label_all 输出
+│   ├── code-trajectory-2.4k/      # 最终 train/val/test 划分
+│   └── prm800k/                   # 数学 PRM 数据(给 Phase 2 ablation 用,已 LFS pull)
+├── third_party/openr/             # submodule,仅作 reference
+└── ...
+
+~/pi/                              # pi monorepo,build 完
+└── packages/coding-agent/dist/cli.js
+
+~/.pi/agent/extensions/
+└── trajectory_logger.ts           # → ~/code-prm/src/collector/trajectory_logger.ts (symlink)
+
+~/miniconda3/                      # 镜像自带 conda(系统 Python 也是 3.12)
+```
+
+### 验证环境完好(任何时候可跑)
+
+```bash
+node --version              # v20.x
+python --version            # 3.12.x
+nvidia-smi | head           # 看到 48GB GPU
+ls ~/pi/packages/coding-agent/dist/cli.js   # pi 已 build
+ls ~/.pi/agent/extensions/trajectory_logger.ts  # extension 已软链
+echo "$ANTHROPIC_BASE_URL"  # 应该有值
+cd ~/code-prm && pytest tests/ -q   # 110+ tests 全过
+```
+
+---
+
 ## 重要文件 / 路径
 
 | 路径 | 用途 |
