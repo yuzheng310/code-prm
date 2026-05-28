@@ -147,11 +147,6 @@ export default function (pi: ExtensionAPI) {
 
   // Map toolCallId → partial step (between tool_call and tool_result).
   const pendingByCallId = new Map<string, Partial<Step>>();
-  // Step indices belonging to the CURRENT assistant message. At message_end
-  // we walk back and fill their `thought` field from the message's text
-  // content. Pi emits tool_call BEFORE message_end for the same message,
-  // so we can't read text at tool_call time — we have to back-fill.
-  let currentMessageStepIndices: number[] = [];
 
   // -------------------------- session lifecycle --------------------------
 
@@ -205,11 +200,40 @@ export default function (pi: ExtensionAPI) {
 
   // -------------------------- tool lifecycle --------------------------
 
-  pi.on("tool_call", async (event, _ctx) => {
+  pi.on("tool_call", async (event, ctx) => {
     if (!traj) return;
+    // Read the CURRENT assistant message text from sessionManager.
+    // pi docs explicitly guarantee: "Before `tool_call` runs, pi waits
+    // for previously emitted Agent events to finish draining through
+    // AgentSession. This means `ctx.sessionManager` is up to date
+    // through the current assistant tool-calling message."
+    // So the last assistant entry's text content is THIS message's thought.
+    let thought = "";
+    try {
+      const sm = (ctx as { sessionManager?: { getEntries?: () => unknown[] } }).sessionManager;
+      const entries = sm?.getEntries?.() ?? [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i] as
+          | { type?: string; message?: { role?: string; content?: unknown } }
+          | undefined;
+        if (entry?.type !== "message") continue;
+        const msg = entry.message;
+        if (msg?.role !== "assistant") continue;
+        if (Array.isArray(msg.content)) {
+          const texts = (msg.content as Array<{ type?: string; text?: string }>)
+            .filter((c) => c && c.type === "text" && typeof c.text === "string")
+            .map((c) => c.text as string);
+          thought = texts.join("\n");
+        }
+        break;
+      }
+    } catch {
+      /* sessionManager API not available — leave thought empty */
+    }
     pendingByCallId.set(event.toolCallId, {
       tool: event.toolName,
       tool_args: event.input as Record<string, unknown>,
+      thought: truncate(thought, 2000),
     });
   });
 
@@ -223,13 +247,12 @@ export default function (pi: ExtensionAPI) {
     const step: Step = {
       step: stepIdx++,
       role: "assistant",
-      thought: "", // back-filled at message_end (pi emits tool_call BEFORE message_end)
+      thought: pending.thought || "",
       tool: pending.tool || null,
       tool_args: pending.tool_args || {},
       tool_result: truncate(resultText, 8000),
     };
     traj.trajectory.push(step);
-    currentMessageStepIndices.push(traj.trajectory.length - 1);
     pendingByCallId.delete(event.toolCallId);
   });
 
@@ -271,29 +294,10 @@ export default function (pi: ExtensionAPI) {
     else if (msg.model) policyModel = msg.model;
     if (traj) traj.policy_model = policyModel;
 
-    // Extract assistant text and back-fill `thought` onto the tool steps
-    // that came from THIS message. Distribute the text across all those
-    // steps (cheap: same thought for all sibling tool calls in one message).
-    let assistantText = "";
-    if (Array.isArray(msg.content)) {
-      const texts = msg.content
-        .filter(
-          (c): c is { type: "text"; text: string } =>
-            !!c && typeof c === "object" && (c as { type?: string }).type === "text" &&
-            typeof (c as { text?: string }).text === "string",
-        )
-        .map((c) => c.text);
-      assistantText = texts.join("\n");
-    }
-    if (assistantText && traj && currentMessageStepIndices.length > 0) {
-      const truncated = truncate(assistantText, 2000);
-      for (const idx of currentMessageStepIndices) {
-        if (idx >= 0 && idx < traj.trajectory.length) {
-          traj.trajectory[idx].thought = truncated;
-        }
-      }
-    }
-    currentMessageStepIndices = []; // reset for next message
+    // NOTE: assistant thought is captured at tool_call time via
+    // ctx.sessionManager (see tool_call handler). We don't need to
+    // re-extract it here. message_end is purely for stamping policy_model
+    // and accumulating token_usage at this point.
 
     // Accumulate token usage. Pi's Usage shape (packages/ai/src/types.ts):
     //   { input, output, cacheRead, cacheWrite, totalTokens, cost: {...} }
@@ -363,7 +367,6 @@ export default function (pi: ExtensionAPI) {
     traj = null;
     stepIdx = 0;
     pendingByCallId.clear();
-    currentMessageStepIndices = [];
   });
 
   // Best-effort flush on session shutdown in case agent_end didn't fire.
