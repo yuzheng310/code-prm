@@ -97,7 +97,7 @@ async def collect(
     policy_model: str = "claude-sonnet-4-5",
     timeout_sec: int = 600,
     limit: int | None = None,
-    max_initial_failures: int = 5,
+    max_initial_failed_attempts: int = 5,
 ) -> tuple[CostTracker, CollectionStats]:
     """Drive end-to-end collection. Returns (tracker, stats).
 
@@ -199,20 +199,26 @@ async def collect(
             )
 
     def _maybe_set_abort_on_early_failures() -> None:
-        """If the FIRST max_initial_failures attempts all failed (zero successes),
-        the config is probably broken — abort to avoid burning the whole batch."""
+        """Abort if the FIRST `max_initial_failed_attempts` rollout attempts
+        all failed without a single success.
+
+        NOTE: this counts ATTEMPTS, not unique tasks. With num_rollouts=4 a
+        single broken task contributes 4 to this counter, so the guard
+        fires sooner with high num_rollouts — that is acceptable because
+        the configuration is broken either way.
+        """
         if abort_flag["set"]:
             return
         if stats.succeeded > 0:
             return  # Once we have any success, this guard never fires.
-        initial_failures = stats.failed + stats.timed_out + stats.crashed
-        if initial_failures >= max_initial_failures:
+        initial_failed_attempts = stats.failed + stats.timed_out + stats.crashed
+        if initial_failed_attempts >= max_initial_failed_attempts:
             abort_flag["set"] = True
-            abort_flag["reason"] = "max_initial_failures"
+            abort_flag["reason"] = "max_initial_failed_attempts"
             print(
-                f"\n[!] First {initial_failures} tasks all failed before any "
-                "succeeded. ABORTING batch — likely a TS-side config bug "
-                "(missing deps, agent crash on init, wrong CLI args).\n"
+                f"\n[!] First {initial_failed_attempts} rollout attempts all "
+                "failed before any succeeded. ABORTING batch — likely a TS-side "
+                "config bug (missing deps, agent crash on init, wrong CLI args).\n"
                 "    Investigate one task manually:\n"
                 f"      node $TS_REPO_PATH/dist/cli.js run --task-id <id> --task-type <T>\n"
             )
@@ -236,11 +242,42 @@ async def collect(
 
     print(tracker)
     print(stats)
+
+    # Sanity-check that the TS side actually wrote jsonl lines.
+    # `stats.succeeded` only counts subprocess exit code 0 — the TS logger
+    # might still not have written anything (CODE_PRM_LOG_DIR ignored,
+    # logger not wired, agent exited 0 without finalize, etc.).
+    jsonl_lines = _count_jsonl_lines(log_dir)
+    print(f"\nTS-side jsonl lines written: {jsonl_lines}")
+    print(f"Subprocess successes:        {stats.succeeded}")
+    if stats.succeeded > 0:
+        ratio = jsonl_lines / stats.succeeded
+        if ratio < 0.8:
+            print(
+                f"\n[WARNING] Only {jsonl_lines}/{stats.succeeded} successful "
+                f"runs produced a jsonl line ({ratio:.0%}). The TS logger may\n"
+                "not be wired up correctly. Inspect data/raw and check that\n"
+                "the TS side honors CODE_PRM_LOG_DIR per ts_logger_spec.md."
+            )
+        else:
+            print(f"jsonl/success ratio: {ratio:.0%} (acceptable)")
     print(
         "\n[!] Cost above is ESTIMATED. Aggregate real cost via:\n"
         "    python -m src.utils.cost_aggregator --dir " + str(log_dir)
     )
     return tracker, stats
+
+
+def _count_jsonl_lines(directory: Path) -> int:
+    """Count non-empty lines across all *.jsonl files under `directory`."""
+    n = 0
+    for f in directory.rglob("*.jsonl"):
+        try:
+            with open(f) as fh:
+                n += sum(1 for line in fh if line.strip())
+        except OSError:
+            continue
+    return n
 
 
 def main() -> None:
@@ -264,8 +301,10 @@ def main() -> None:
         help="Per-task subprocess timeout (default 10 min).",
     )
     p.add_argument(
-        "--max_initial_failures", type=int, default=5,
-        help="If first N tasks all fail before any success, abort the batch. "
+        "--max_initial_failed_attempts", type=int, default=5,
+        help="If the first N rollout ATTEMPTS all fail before any success, "
+             "abort the batch. Counts rollouts, not unique tasks — with "
+             "num_rollouts=4 a single broken task contributes 4 attempts. "
              "Catches config bugs early instead of burning the whole budget.",
     )
     args = p.parse_args()
@@ -280,7 +319,7 @@ def main() -> None:
             policy_model=args.policy_model,
             timeout_sec=args.timeout_sec,
             limit=args.limit,
-            max_initial_failures=args.max_initial_failures,
+            max_initial_failed_attempts=args.max_initial_failed_attempts,
         )
     )
 

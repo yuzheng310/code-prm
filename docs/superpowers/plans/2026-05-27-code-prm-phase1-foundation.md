@@ -147,7 +147,17 @@ Each task: ✅ committed / ⏳ pending external action / ⚠️ blocked-on-user.
    9. Pilot real-cost check:  python -m src.utils.cost_aggregator --dir data/raw/pilot
   10. Pilot labeling:  python -m src.labeler.label_all \
         --input_dir data/raw/pilot --output_dir data/labeled/pilot \
-        --budget_usd 5 --K 4                                         (Task 18)
+        --budget_usd 5 --K 4 --clean                                 (Task 18)
+                                                                      # Pilot data
+                                                                      # likely has
+                                                                      # task_prompt
+                                                                      # coverage < 95%
+                                                                      # before TS
+                                                                      # logger is
+                                                                      # fully wired,
+                                                                      # so you may
+                                                                      # also need
+                                                                      # --allow_low_task_prompt_coverage
   11. Inspect step_label distribution; commit pilot summary
   12. Full SWE:        bash scripts/10_collect_trajectories.sh       (Task 13)
   13. Full BigCode:    bash scripts/11_collect_bigcodebench.sh       (Task 14)

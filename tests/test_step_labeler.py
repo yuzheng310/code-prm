@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.labeler.step_labeler import (
     _build_continuation_prompt,
     _parses_as_successful,

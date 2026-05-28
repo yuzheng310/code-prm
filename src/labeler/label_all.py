@@ -9,12 +9,19 @@ Output filenames preserve the input's relative subpath flattened with "__"
 to avoid collisions when nested directories contain same-named files
 (e.g. rollout_0/foo.jsonl + rollout_1/foo.jsonl).
 
-Also performs a pre-flight `task_prompt` coverage check on the INPUT
-trajectories. If too few have `task_prompt`, the LLM judge has no problem
-statement to anchor on and label quality will be near-random. Default
-threshold: 90% of outcome=1 trajectories must have a non-empty
-`task_prompt`. Warns on stdout and continues (does not abort) so the user
-can decide whether to proceed.
+Pre-flight `task_prompt` coverage check on the INPUT trajectories:
+if too few have non-empty `task_prompt`, the LLM judge has no problem
+statement to anchor on and labels will be near-random.
+
+  - Default threshold: 95% of outcome=1 trajectories must have non-empty
+    `task_prompt` (matches Phase 1 exit criterion).
+  - Behavior on threshold violation: ABORT with SystemExit(2).
+  - To override: pass `--allow_low_task_prompt_coverage`.
+  - To raise/lower the threshold: pass `--min_task_prompt_coverage X.XX`.
+
+After a successful run, writes a `labeling_manifest.json` to
+`--output_dir` documenting: input/output paths, sizes, mtimes, K, model,
+task_prompt coverage achieved, processed/skipped files, and total cost.
 """
 from __future__ import annotations
 import argparse

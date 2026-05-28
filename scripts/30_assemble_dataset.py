@@ -154,6 +154,35 @@ def check_token_usage_coverage(
     )
 
 
+def check_outcome_zero_simplification_labels(
+    trajectories: list[Trajectory],
+) -> CheckResult:
+    """For trajectories tagged `outcome_zero_simplification`, every TOOL step
+    must have `step_label == 0.0`. Pure-thought steps may keep None.
+
+    Catches the case where label_method was set but the step_label assignment
+    didn't actually happen (e.g. only_tool_steps=False path bug or partial run).
+    """
+    bad: list[str] = []
+    for t in trajectories:
+        if t.label_method != "outcome_zero_simplification":
+            continue
+        for s in t.trajectory:
+            if s.tool is not None and s.step_label != 0.0:
+                bad.append(t.task_id)
+                break
+    return CheckResult(
+        name="outcome_zero_simplification trajectories have step_label=0 on every tool step",
+        passed=len(bad) == 0,
+        detail=(
+            "all clean"
+            if not bad
+            else f"{len(bad)} trajectories have non-zero tool step_label "
+                 f"(first: {bad[:3]})"
+        ),
+    )
+
+
 def check_step_label_distribution_non_degenerate(
     trajectories: list[Trajectory],
     low: float = 0.2,
@@ -185,6 +214,7 @@ def run_all_checks(trajectories: list[Trajectory]) -> list[CheckResult]:
         check_label_method_set(trajectories),
         check_task_prompt_coverage(trajectories, threshold=0.95),
         check_step_label_coverage(trajectories, threshold=0.80),
+        check_outcome_zero_simplification_labels(trajectories),
         check_token_usage_coverage(trajectories, threshold=0.80),
         check_step_label_distribution_non_degenerate(trajectories),
     ]

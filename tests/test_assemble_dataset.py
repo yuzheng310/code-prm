@@ -189,10 +189,47 @@ def test_step_label_distribution_excludes_outcome_zero_simplification() -> None:
     assert "mean=0.500" in r.detail
 
 
-def test_run_all_checks_returns_five_results() -> None:
+def test_outcome_zero_simplification_check_passes_when_all_zero() -> None:
+    t = _traj(task_id="t1", outcome=0, task_prompt="p",
+              label_method="outcome_zero_simplification",
+              step_labels=[0.0, 0.0, 0.0])
+    r = assemble.check_outcome_zero_simplification_labels([t])
+    assert r.passed
+
+
+def test_outcome_zero_simplification_check_fails_when_nonzero_present() -> None:
+    """outcome_zero_simplification + a tool step with step_label != 0 is a bug."""
+    t = _traj(task_id="t1", outcome=0, task_prompt="p",
+              label_method="outcome_zero_simplification",
+              step_labels=[0.0, 0.5, 0.0])  # 0.5 is illegal here
+    r = assemble.check_outcome_zero_simplification_labels([t])
+    assert not r.passed
+    assert "t1" in r.detail
+
+
+def test_outcome_zero_simplification_check_ignores_thought_steps() -> None:
+    """A pure-thought step (tool=None) with step_label=None is fine."""
+    t = _traj(task_id="t1", outcome=0, task_prompt="p",
+              label_method="outcome_zero_simplification",
+              step_labels=[0.0, 0.0, 0.0])
+    t.trajectory.append(Step(step=3, tool=None, thought="thinking"))  # None label
+    r = assemble.check_outcome_zero_simplification_labels([t])
+    assert r.passed
+
+
+def test_outcome_zero_simplification_check_skips_llm_judge_trajectories() -> None:
+    """The check only applies to outcome_zero_simplification, not llm_judge."""
+    t = _traj(task_id="t1", outcome=1, task_prompt="p",
+              label_method="llm_judge",
+              step_labels=[0.5, 0.5, 0.5])  # non-zero is normal for judge
+    r = assemble.check_outcome_zero_simplification_labels([t])
+    assert r.passed
+
+
+def test_run_all_checks_returns_six_results() -> None:
     trajs = [
         _traj(task_id="t1", outcome=1, task_prompt="p", label_method="llm_judge",
               step_labels=[0.5, 0.5, 0.5]),
     ]
     results = assemble.run_all_checks(trajs)
-    assert len(results) == 5
+    assert len(results) == 6

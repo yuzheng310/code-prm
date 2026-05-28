@@ -71,7 +71,7 @@ def test_limit_slices_tasks(env, tmp_path) -> None:
         log_dir=tmp_path / "logs",
         budget_usd=1000,
         limit=10,
-        max_initial_failures=999,  # disable for this test
+        max_initial_failed_attempts=999,  # disable for this test
     ))
     assert len(log) == 10
     assert stats.succeeded == 10
@@ -88,7 +88,7 @@ def test_num_rollouts_multiplies(env, tmp_path) -> None:
         concurrency=2,
         log_dir=tmp_path / "logs",
         budget_usd=1000,
-        max_initial_failures=999,
+        max_initial_failed_attempts=999,
     ))
     assert stats.total == 12
     rollouts_seen = sorted({c["rollout"] for c in log})
@@ -108,7 +108,7 @@ def test_launch_error_aborts_remaining(env, tmp_path) -> None:
         concurrency=1,  # serial to make the abort deterministic
         log_dir=tmp_path / "logs",
         budget_usd=1000,
-        max_initial_failures=999,
+        max_initial_failed_attempts=999,
     ))
     # Task 0 ran and failed; tasks 1..49 should have been skipped.
     assert stats.failed >= 1
@@ -127,7 +127,7 @@ def test_budget_exceeded_skips_remaining(env, tmp_path) -> None:
         concurrency=1,
         log_dir=tmp_path / "logs",
         budget_usd=0.20,
-        max_initial_failures=999,
+        max_initial_failed_attempts=999,
     ))
     assert stats.succeeded >= 1
     assert stats.succeeded < 20
@@ -148,7 +148,7 @@ def test_timeout_does_not_abort_gather(env, tmp_path) -> None:
         concurrency=1,
         log_dir=tmp_path / "logs",
         budget_usd=1000,
-        max_initial_failures=999,
+        max_initial_failed_attempts=999,
     ))
     # Task 0 timed out; tasks 1..4 should have succeeded (4 successes, 1 timeout).
     assert stats.timed_out == 1
@@ -156,8 +156,8 @@ def test_timeout_does_not_abort_gather(env, tmp_path) -> None:
     assert stats.total == 5
 
 
-def test_max_initial_failures_aborts(env, tmp_path) -> None:
-    """If the first N tasks all fail before any success, abort the batch."""
+def test_max_initial_failed_attempts_aborts(env, tmp_path) -> None:
+    """If the first N rollout ATTEMPTS all fail before any success, abort."""
     log = _patch_loader_and_runner(env, n_tasks=50, status_for=lambda i, k: "failed")
 
     tracker, stats = asyncio.run(collect_batch.collect(
@@ -166,7 +166,7 @@ def test_max_initial_failures_aborts(env, tmp_path) -> None:
         concurrency=1,
         log_dir=tmp_path / "logs",
         budget_usd=1000,
-        max_initial_failures=3,
+        max_initial_failed_attempts=3,
     ))
     # 3 failures should trigger abort; remaining tasks counted as skipped.
     assert stats.failed >= 3
@@ -190,7 +190,7 @@ def test_one_success_disables_initial_failure_guard(env, tmp_path) -> None:
         concurrency=1,
         log_dir=tmp_path / "logs",
         budget_usd=1000,
-        max_initial_failures=3,
+        max_initial_failed_attempts=3,
     ))
     # Even with 3 failures, total should be 10 (no abort).
     assert stats.total == 10
