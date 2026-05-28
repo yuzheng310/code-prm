@@ -94,9 +94,9 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    tracker = CostTracker(budget_usd=args.budget_usd)
-    client = RateLimitedClient(tracker, model=args.model)
-
+    # --- All preflights run BEFORE we touch the Anthropic API key. This lets
+    # ---  CI / lab-box smoke runs sanity-check guards without needing a real
+    # ---  API key in env.
     files = sorted(args.input_dir.rglob("*.jsonl"))
     if not files:
         print(f"WARN: no *.jsonl files (recursive) in {args.input_dir}")
@@ -153,6 +153,17 @@ def main() -> None:
                     "that would destroy the input. Pick a non-ancestor "
                     "output_dir."
                 )
+            if out_resolved.is_relative_to(in_resolved):
+                # output inside input is also dangerous: future runs would
+                # rglob output as input (mixing labeled jsonl into raw input),
+                # and --clean would delete previously-labeled output that
+                # happens to sit in the input tree.
+                raise SystemExit(
+                    f"FATAL: --output_dir ({out_resolved}) lives inside "
+                    f"--input_dir ({in_resolved}). This layout causes the "
+                    "input scan to pick up your own labeled output on "
+                    "subsequent runs. Pick a non-descendant output_dir."
+                )
             import shutil
             print(f"Removing existing output dir: {args.output_dir}")
             shutil.rmtree(args.output_dir)
@@ -170,6 +181,11 @@ def main() -> None:
             time.sleep(5)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # All preflights / foot-gun guards have passed. NOW initialize the
+    # Anthropic client (which requires ANTHROPIC_API_KEY).
+    tracker = CostTracker(budget_usd=args.budget_usd)
+    client = RateLimitedClient(tracker, model=args.model)
 
     # Manifest accumulates input-file metadata for downstream provenance.
     started_at = _dt.datetime.now(_dt.timezone.utc).isoformat()

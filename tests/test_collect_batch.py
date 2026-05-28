@@ -189,6 +189,50 @@ def test_low_jsonl_ratio_aborts_by_default(env, tmp_path) -> None:
     assert exc.value.code == 3
 
 
+def test_clean_refuses_when_nested_jsonl_present(env, tmp_path) -> None:
+    """If log_dir contains *.jsonl in subdirectories, --clean refuses.
+
+    Catches the foot-gun where CODE_PRM_LOG_DIR points to a parent
+    directory holding multiple task-set collections.
+    """
+    log_dir = tmp_path / "data" / "raw"
+    log_dir.mkdir(parents=True)
+    sibling = log_dir / "swebench-lite"
+    sibling.mkdir()
+    (sibling / "valuable.jsonl").write_text('{"y": 2}\n')
+
+    _patch_loader_and_runner(env, n_tasks=1, status_for=lambda i, k: "ok")
+
+    with pytest.raises(RuntimeError, match="nested"):
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=log_dir,
+            budget_usd=1000,
+            clean=True,
+            max_initial_failed_attempts=999,
+            allow_low_jsonl_success_ratio=True,
+        ))
+    # Nested data must still exist after the refusal.
+    assert (sibling / "valuable.jsonl").exists()
+
+
+def test_zero_successes_exits_3_when_guard_disabled(env, tmp_path) -> None:
+    """If every attempt fails but max_initial_failed_attempts is huge,
+    we still exit non-zero — zero data collected is never 'fine'."""
+    _patch_loader_and_runner(env, n_tasks=2, status_for=lambda i, k: "failed")
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(collect_batch.collect(
+            task_set="swebench-lite",
+            num_rollouts=1, concurrency=1,
+            log_dir=tmp_path / "logs",
+            budget_usd=1000,
+            max_initial_failed_attempts=999,  # disable early-abort
+        ))
+    assert exc.value.code == 3
+
+
 def test_low_jsonl_ratio_allowed_via_flag(env, tmp_path) -> None:
     log_dir = tmp_path / "logs"
     _patch_loader_and_runner(env, n_tasks=5, status_for=lambda i, k: "ok")

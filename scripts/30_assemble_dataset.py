@@ -27,6 +27,18 @@ from src.labeler.trajectory_schema import Trajectory  # noqa: E402
 from src.utils.jsonl_io import read_trajectories, write_trajectories  # noqa: E402
 
 
+# --- shared check-result type (used by inspect_manifests + exit-criteria
+#     checks; declared up front for readability so forward references go
+#     away) ---
+
+
+@dataclass
+class CheckResult:
+    name: str
+    passed: bool
+    detail: str
+
+
 # --- collection ---
 
 
@@ -157,14 +169,7 @@ def report(split_name: str, data: list[Trajectory]) -> None:
     )
 
 
-# --- exit-criteria checks ---
-
-
-@dataclass
-class CheckResult:
-    name: str
-    passed: bool
-    detail: str
+# --- exit-criteria checks (CheckResult defined above) ---
 
 
 def check_label_method_set(trajectories: list[Trajectory]) -> CheckResult:

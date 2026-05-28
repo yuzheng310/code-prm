@@ -134,30 +134,38 @@ async def collect(
 
     # Log-dir hygiene: refuse to silently append onto a previous run.
     log_dir.mkdir(parents=True, exist_ok=True)
-    existing = list(log_dir.rglob("*.jsonl"))
-    if existing:
+    # Detection uses rglob (be aggressive: any pre-existing jsonl anywhere
+    # under log_dir is grounds to halt). Deletion uses glob (be conservative:
+    # only touch the flat-layer contract docs promise).
+    existing_any = list(log_dir.rglob("*.jsonl"))
+    direct_jsonl = list(log_dir.glob("*.jsonl"))
+    nested_jsonl = [p for p in existing_any if p not in direct_jsonl]
+    if existing_any:
         if clean and allow_append:
             raise RuntimeError("--clean and --allow_append are mutually exclusive.")
         if clean:
-            # Conservative cleanup: only delete the *.jsonl files we found,
-            # then prune any directories that become empty as a result. DO
-            # NOT rmtree anything — protects against the foot-gun where a
-            # user sets CODE_PRM_LOG_DIR=$PWD/data/raw (parent of multiple
-            # task-set dirs) and would otherwise lose sibling collections.
-            for p in existing:
+            # Foot-gun guard: if there are nested jsonl files under log_dir,
+            # refuse to --clean. The documented layout is flat; nested jsonl
+            # under log_dir means the user probably pointed log_dir at a
+            # parent directory (e.g. CODE_PRM_LOG_DIR=$PWD/data/raw instead
+            # of $PWD/data/raw/swebench-lite). Deleting nested data without
+            # explicit consent risks losing sibling task-set collections.
+            if nested_jsonl:
+                raise RuntimeError(
+                    f"--clean refused: log_dir {log_dir} contains "
+                    f"{len(nested_jsonl)} nested *.jsonl file(s) in "
+                    "subdirectories. The flat-layout contract says all "
+                    "rollouts write to log_dir directly. If those nested "
+                    "files are deliberate, point log_dir at the specific "
+                    "task-set subdirectory; otherwise manually inspect "
+                    f"before cleaning (first nested: {nested_jsonl[:3]})."
+                )
+            for p in direct_jsonl:
                 p.unlink()
-            # Walk depth-first and rmdir only empty dirs (silently skip
-            # non-empty ones, which preserves any non-jsonl artifacts).
-            for child in sorted(log_dir.rglob("*"), reverse=True):
-                if child.is_dir():
-                    try:
-                        child.rmdir()
-                    except OSError:
-                        pass  # not empty — leave it
-            print(f"Cleaned {len(existing)} stale jsonl file(s) from {log_dir}")
+            print(f"Cleaned {len(direct_jsonl)} stale jsonl file(s) from {log_dir}")
         elif allow_append:
             print(
-                f"[!] log_dir {log_dir} contains {len(existing)} existing "
+                f"[!] log_dir {log_dir} contains {len(existing_any)} existing "
                 "jsonl file(s); appending as requested. Downstream stats "
                 "(including jsonl/success ratio) WILL mix old and new "
                 "trajectories — interpret with care."
@@ -165,9 +173,9 @@ async def collect(
         else:
             raise RuntimeError(
                 f"log_dir {log_dir} is non-empty (found "
-                f"{len(existing)} *.jsonl file(s)). Refusing to append "
-                "silently. Pass --clean to wipe (only *.jsonl + empty "
-                "dirs are removed), or --allow_append to merge."
+                f"{len(existing_any)} *.jsonl file(s)). Refusing to append "
+                "silently. Pass --clean to wipe (only direct *.jsonl in "
+                "log_dir; refuses on nested), or --allow_append to merge."
             )
     sem = asyncio.Semaphore(concurrency)
     total_runs = len(tasks) * num_rollouts
@@ -291,6 +299,26 @@ async def collect(
     jsonl_lines = _count_jsonl_lines(log_dir)
     print(f"\nTS-side jsonl lines written: {jsonl_lines}")
     print(f"Subprocess successes:        {stats.succeeded}")
+    if stats.succeeded == 0 and stats.total > 0:
+        # Catches the case where every attempt failed but the early-failure
+        # guard was disabled (e.g. --max_initial_failed_attempts=999 or
+        # total < threshold). Without this, the function would exit 0 with
+        # zero data collected — misleading.
+        if allow_low_jsonl_success_ratio:
+            print(
+                "\n[WARNING] Zero successful runs across "
+                f"{stats.total} attempts; --allow_low_jsonl_success_ratio "
+                "set, so not raising. But you almost certainly want to "
+                "investigate before proceeding."
+            )
+        else:
+            print(
+                "\n[FATAL] Zero successful runs across "
+                f"{stats.total} attempts. Investigate the TS codeAgent "
+                "config (try one task manually). Exit code 3.\n"
+                "Pass --allow_low_jsonl_success_ratio to override."
+            )
+            raise SystemExit(3)
     if stats.succeeded > 0:
         ratio = jsonl_lines / stats.succeeded
         print(f"jsonl/success ratio: {ratio:.0%}  (threshold: {min_jsonl_success_ratio:.0%})")
