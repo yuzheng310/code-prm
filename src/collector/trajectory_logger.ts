@@ -220,10 +220,23 @@ export default function (pi: ExtensionAPI) {
         const msg = entry.message;
         if (msg?.role !== "assistant") continue;
         if (Array.isArray(msg.content)) {
-          const texts = (msg.content as Array<{ type?: string; text?: string }>)
-            .filter((c) => c && c.type === "text" && typeof c.text === "string")
-            .map((c) => c.text as string);
-          thought = texts.join("\n");
+          // Capture BOTH TextContent and ThinkingContent in order. For
+          // extended-thinking mode, the reasoning lives in ThinkingContent,
+          // not TextContent. (Many simple BigCodeBench tasks go straight
+          // from thinking to ToolCall with no narrative text block.)
+          const pieces = (msg.content as Array<Record<string, unknown>>)
+            .map((c) => {
+              if (!c || typeof c !== "object") return "";
+              if (c.type === "text" && typeof c.text === "string") {
+                return c.text;
+              }
+              if (c.type === "thinking" && typeof c.thinking === "string") {
+                return c.thinking;
+              }
+              return "";
+            })
+            .filter((s) => s.length > 0);
+          thought = pieces.join("\n");
         }
         break;
       }
