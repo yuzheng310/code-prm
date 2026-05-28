@@ -112,14 +112,13 @@ function inferTaskPrompt(task: Record<string, unknown>): string | null {
   return null;
 }
 
-function readToolResultText(eventResult: unknown): string {
-  // pi tool_result event carries the tool execution result. The result object
-  // structure depends on the tool but typically has `content: [{type, text}]`.
-  // TODO(verify-pi-api): confirm exact shape on lab box; adjust if needed.
-  if (!eventResult || typeof eventResult !== "object") return "";
-  const r = eventResult as { content?: Array<{ type?: string; text?: string }> };
-  if (!Array.isArray(r.content)) return JSON.stringify(eventResult).slice(0, 8000);
-  return r.content
+function readToolResultText(content: unknown): string {
+  // pi ToolResultEvent shape (per packages/agent/src/harness/types.ts):
+  //   { type: "tool_result", toolCallId, toolName, input,
+  //     content: Array<TextContent | ImageContent>, details, isError }
+  // We pass `event.content` directly here.
+  if (!Array.isArray(content)) return "";
+  return (content as Array<{ type?: string; text?: string }>)
     .filter((c) => c && c.type === "text" && typeof c.text === "string")
     .map((c) => c.text as string)
     .join("\n");
@@ -138,7 +137,6 @@ export default function (pi: ExtensionAPI) {
   let traj: Trajectory | null = null;
   let stepIdx = 0;
   let policyModel = "unknown";
-  let lastAssistantThought = ""; // most recent assistant text → attached to next tool step
   const tokenUsage: TokenUsage = {
     input_tokens: 0,
     output_tokens: 0,
@@ -149,6 +147,11 @@ export default function (pi: ExtensionAPI) {
 
   // Map toolCallId → partial step (between tool_call and tool_result).
   const pendingByCallId = new Map<string, Partial<Step>>();
+  // Step indices belonging to the CURRENT assistant message. At message_end
+  // we walk back and fill their `thought` field from the message's text
+  // content. Pi emits tool_call BEFORE message_end for the same message,
+  // so we can't read text at tool_call time — we have to back-fill.
+  let currentMessageStepIndices: number[] = [];
 
   // -------------------------- session lifecycle --------------------------
 
@@ -200,16 +203,6 @@ export default function (pi: ExtensionAPI) {
     stepIdx = 0;
   });
 
-  // -------------------------- model selection --------------------------
-
-  pi.on("model_select", async (event, _ctx) => {
-    // event shape: { modelId, ... }. TODO(verify-pi-api): exact field name.
-    const ev = event as { modelId?: string; model?: string };
-    if (ev.modelId) policyModel = ev.modelId;
-    else if (ev.model) policyModel = ev.model;
-    if (traj) traj.policy_model = policyModel;
-  });
-
   // -------------------------- tool lifecycle --------------------------
 
   pi.on("tool_call", async (event, _ctx) => {
@@ -217,24 +210,26 @@ export default function (pi: ExtensionAPI) {
     pendingByCallId.set(event.toolCallId, {
       tool: event.toolName,
       tool_args: event.input as Record<string, unknown>,
-      thought: lastAssistantThought,
     });
-    lastAssistantThought = ""; // consumed by this tool step
   });
 
   pi.on("tool_result", async (event, _ctx) => {
     if (!traj) return;
     const pending = pendingByCallId.get(event.toolCallId) || {};
-    const resultText = readToolResultText((event as { result?: unknown }).result);
+    // Per packages/agent/src/harness/types.ts ToolResultEvent: result content
+    // lives directly on event.content, NOT on event.result.content.
+    const ev = event as { content?: unknown };
+    const resultText = readToolResultText(ev.content);
     const step: Step = {
       step: stepIdx++,
       role: "assistant",
-      thought: truncate(pending.thought || "", 2000),
+      thought: "", // back-filled at message_end (pi emits tool_call BEFORE message_end)
       tool: pending.tool || null,
       tool_args: pending.tool_args || {},
       tool_result: truncate(resultText, 8000),
     };
     traj.trajectory.push(step);
+    currentMessageStepIndices.push(traj.trajectory.length - 1);
     pendingByCallId.delete(event.toolCallId);
   });
 
@@ -242,13 +237,44 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_end", async (event, _ctx) => {
     if (!traj) return;
+    // pi AgentMessage union: UserMessage | AssistantMessage | ToolResultMessage.
+    // Only AssistantMessage has model + usage; we care about those.
     const msg = (event as { message?: unknown }).message as
-      | { role?: string; content?: unknown; usage?: unknown }
+      | {
+          role?: string;
+          content?: unknown;
+          model?: string;
+          responseModel?: string;
+          provider?: string;
+          usage?: {
+            input?: number;
+            output?: number;
+            cacheRead?: number;
+            cacheWrite?: number;
+            totalTokens?: number;
+            cost?: {
+              total?: number;
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+            };
+          };
+        }
       | undefined;
     if (!msg || msg.role !== "assistant") return;
 
-    // Capture the latest assistant text so the NEXT tool_call can attach it
-    // as thought.
+    // Stamp policy_model from the message itself. Prefer responseModel
+    // (the actually-served model, e.g. when openrouter resolves "auto"),
+    // fall back to the requested model.
+    if (msg.responseModel) policyModel = msg.responseModel;
+    else if (msg.model) policyModel = msg.model;
+    if (traj) traj.policy_model = policyModel;
+
+    // Extract assistant text and back-fill `thought` onto the tool steps
+    // that came from THIS message. Distribute the text across all those
+    // steps (cheap: same thought for all sibling tool calls in one message).
+    let assistantText = "";
     if (Array.isArray(msg.content)) {
       const texts = msg.content
         .filter(
@@ -257,24 +283,26 @@ export default function (pi: ExtensionAPI) {
             typeof (c as { text?: string }).text === "string",
         )
         .map((c) => c.text);
-      if (texts.length > 0) lastAssistantThought = texts.join("\n");
+      assistantText = texts.join("\n");
     }
-
-    // Accumulate token usage.
-    const usage = msg.usage as
-      | {
-          input_tokens?: number;
-          output_tokens?: number;
-          cache_read_input_tokens?: number;
-          cache_creation_input_tokens?: number;
-          cost?: { total?: number };
+    if (assistantText && traj && currentMessageStepIndices.length > 0) {
+      const truncated = truncate(assistantText, 2000);
+      for (const idx of currentMessageStepIndices) {
+        if (idx >= 0 && idx < traj.trajectory.length) {
+          traj.trajectory[idx].thought = truncated;
         }
-      | undefined;
+      }
+    }
+    currentMessageStepIndices = []; // reset for next message
+
+    // Accumulate token usage. Pi's Usage shape (packages/ai/src/types.ts):
+    //   { input, output, cacheRead, cacheWrite, totalTokens, cost: {...} }
+    const usage = msg.usage;
     if (usage) {
-      tokenUsage.input_tokens += usage.input_tokens ?? 0;
-      tokenUsage.output_tokens += usage.output_tokens ?? 0;
-      tokenUsage.cache_read_tokens += usage.cache_read_input_tokens ?? 0;
-      tokenUsage.cache_creation_tokens += usage.cache_creation_input_tokens ?? 0;
+      tokenUsage.input_tokens += usage.input ?? 0;
+      tokenUsage.output_tokens += usage.output ?? 0;
+      tokenUsage.cache_read_tokens += usage.cacheRead ?? 0;
+      tokenUsage.cache_creation_tokens += usage.cacheWrite ?? 0;
       tokenUsage.cost_usd += usage.cost?.total ?? 0;
     }
   });
@@ -335,7 +363,7 @@ export default function (pi: ExtensionAPI) {
     traj = null;
     stepIdx = 0;
     pendingByCallId.clear();
-    lastAssistantThought = "";
+    currentMessageStepIndices = [];
   });
 
   // Best-effort flush on session shutdown in case agent_end didn't fire.

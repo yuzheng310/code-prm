@@ -5,6 +5,7 @@ test runs in seconds and works without the TS codeAgent installed.
 """
 from __future__ import annotations
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -153,3 +154,52 @@ def test_extra_env_forwarded(tmp_path: Path, monkeypatch) -> None:
     assert captured["env"]["CODE_PRM_RUN_ID"] == "abc"
     assert captured["env"]["CODE_PRM_LOG_DIR"] == str(tmp_path / "logs")
     assert captured["env"]["CODE_PRM_TASK_TYPE"] == "swe-bench-lite"
+
+
+def test_stream_output_prints_subprocess_lines(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Streaming mode should expose TS subprocess output while it runs."""
+
+    class FakePipe:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = iter(lines)
+
+        def readline(self) -> str:
+            return next(self._lines, "")
+
+        def close(self) -> None:
+            pass
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdout = FakePipe(["thinking\n"])
+            self.stderr = FakePipe(["warning\n"])
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            raise AssertionError("process should not be killed")
+
+    captured: dict = {}
+
+    def fake_popen(cmd, env=None, stdout=None, stderr=None, text=None, bufsize=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    status = swebench_runner.run_task_with_codeagent(
+        _swe_task(),
+        tmp_path / "ts_repo",
+        tmp_path / "logs",
+        extra_env={"CODE_PRM_ROLLOUT_ID": "7"},
+        stream_output=True,
+    )
+
+    assert status == "ok"
+    assert captured["cmd"][0] == "node"
+    out = capsys.readouterr()
+    assert "[django__django-1 rollout=7 stdout] thinking" in out.out
+    assert "[django__django-1 rollout=7 stderr] warning" in out.err

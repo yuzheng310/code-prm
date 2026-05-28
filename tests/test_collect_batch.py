@@ -344,6 +344,31 @@ def test_max_initial_failed_attempts_exits_4(env, tmp_path) -> None:
     assert exc.value.code == 4
 
 
+def test_stream_output_forwarded_to_runner(env, tmp_path) -> None:
+    """collect(..., stream_output=True) should pass through to the TS runner."""
+    monkeypatch = env
+    monkeypatch.setattr(collect_batch, "_load_tasks", lambda task_set: _fake_tasks(1))
+    seen: dict[str, bool] = {}
+
+    def fake_runner(task, ts_repo, log_dir, timeout_sec=600, extra_env=None, stream_output=False):
+        seen["stream_output"] = stream_output
+        return "ok"
+
+    monkeypatch.setattr(collect_batch, "run_task_with_codeagent", fake_runner)
+
+    asyncio.run(collect_batch.collect(
+        task_set="swebench-lite",
+        num_rollouts=1,
+        concurrency=1,
+        log_dir=tmp_path / "logs",
+        budget_usd=1000,
+        stream_output=True,
+        allow_low_jsonl_success_ratio=True,
+    ))
+
+    assert seen["stream_output"] is True
+
+
 def test_one_success_disables_initial_failure_guard(env, tmp_path) -> None:
     """Once any task succeeds, the early-failure guard never fires."""
     def status_for(i, k):

@@ -54,6 +54,21 @@ fi
 
 echo "==> [2/4] Installing pi npm deps + building..."
 cd "$PI_INSTALL_DIR"
+
+# Pi pulls `canvas` transitively (for TUI image rendering); it has native
+# code that needs cairo/pango/etc. to compile. Check + warn if missing.
+MISSING_LIBS=()
+for lib in libcairo2-dev libpango1.0-dev libpixman-1-dev libjpeg-dev libgif-dev librsvg2-dev; do
+    if ! dpkg -s "$lib" &>/dev/null 2>&1; then
+        MISSING_LIBS+=("$lib")
+    fi
+done
+if [ "${#MISSING_LIBS[@]}" -gt 0 ]; then
+    echo "    WARN: missing native build deps for canvas: ${MISSING_LIBS[*]}"
+    echo "    Install with: apt-get install -y build-essential pkg-config ${MISSING_LIBS[*]}"
+    echo "    Or rely on prebuilt canvas binary (needs working network to prebuild CDN)."
+fi
+
 # Use the project's pinned npm if available.
 if [ -f package-lock.json ]; then
     npm ci --no-audit --no-fund

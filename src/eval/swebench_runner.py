@@ -24,8 +24,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, IO, Literal
 
 
 # Process-level launch outcome. NOT the same as agent-task pass/fail.
@@ -67,6 +70,7 @@ def run_task_with_codeagent(
     log_dir: Path,
     timeout_sec: int = 600,
     extra_env: dict[str, str] | None = None,
+    stream_output: bool = False,
 ) -> TaskRunStatus:
     """Run the TS codeAgent on one task as a subprocess.
 
@@ -80,6 +84,7 @@ def run_task_with_codeagent(
         timeout_sec: Subprocess wall-clock timeout.
         extra_env: Additional env vars (e.g. CODE_PRM_ROLLOUT_ID, CODE_PRM_RUN_ID)
             forwarded to the TS subprocess.
+        stream_output: If true, print the TS subprocess stdout/stderr as it runs.
 
     Returns:
         One of `TaskRunStatus`. The agent-level pass/fail is in the jsonl,
@@ -134,6 +139,14 @@ def run_task_with_codeagent(
     ]
 
     try:
+        if stream_output:
+            rollout_id = (extra_env or {}).get("CODE_PRM_ROLLOUT_ID", "0")
+            return _run_streaming_subprocess(
+                cmd=cmd,
+                env=env,
+                timeout_sec=timeout_sec,
+                output_prefix=f"{task_id} rollout={rollout_id}",
+            )
         result = subprocess.run(
             cmd, env=env, capture_output=True, text=True, timeout=timeout_sec,
         )
@@ -145,6 +158,59 @@ def run_task_with_codeagent(
         # This is a CONFIG bug — caller should abort the batch, not paper over it.
         return "launch_error"
     return "ok" if result.returncode == 0 else "failed"
+
+
+def _run_streaming_subprocess(
+    cmd: list[str],
+    env: dict[str, str],
+    timeout_sec: int,
+    output_prefix: str,
+) -> TaskRunStatus:
+    """Run a subprocess while streaming stdout/stderr with task context."""
+
+    def pump(pipe: IO[str] | None, stream: IO[str], channel: str) -> None:
+        if pipe is None:
+            return
+        try:
+            for line in iter(pipe.readline, ""):
+                print(f"[{output_prefix} {channel}] {line}", end="", file=stream, flush=True)
+        finally:
+            pipe.close()
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except (FileNotFoundError, PermissionError, OSError):
+        return "launch_error"
+
+    threads = [
+        threading.Thread(target=pump, args=(proc.stdout, sys.stdout, "stdout"), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, sys.stderr, "stderr"), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    started_at = time.monotonic()
+    timed_out = False
+    while proc.poll() is None:
+        if time.monotonic() - started_at >= timeout_sec:
+            timed_out = True
+            proc.kill()
+            break
+        time.sleep(0.1)
+
+    for thread in threads:
+        thread.join(timeout=1)
+
+    if timed_out:
+        return "timeout"
+    return "ok" if proc.returncode == 0 else "failed"
 
 
 if __name__ == "__main__":

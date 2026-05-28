@@ -22,6 +22,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,7 @@ async def collect(
     allow_append: bool = False,
     min_jsonl_success_ratio: float = 0.8,
     allow_low_jsonl_success_ratio: bool = False,
+    stream_output: bool = False,
 ) -> tuple[CostTracker, CollectionStats]:
     """Drive end-to-end collection. Returns (tracker, stats).
 
@@ -203,14 +205,27 @@ async def collect(
             }
             loop = asyncio.get_running_loop()
             try:
-                status = await loop.run_in_executor(
-                    None,
+                runner = partial(
                     run_task_with_codeagent,
                     task,
                     ts_repo,
                     log_dir,
                     timeout_sec,
                     extra_env,
+                )
+                if stream_output:
+                    runner = partial(
+                        run_task_with_codeagent,
+                        task,
+                        ts_repo,
+                        log_dir,
+                        timeout_sec,
+                        extra_env,
+                        stream_output=True,
+                    )
+                status = await loop.run_in_executor(
+                    None,
+                    runner,
                 )
             except Exception as exc:  # noqa: BLE001 — log and continue
                 print(f"  [crash] task={task.get('instance_id', task.get('task_id', '?'))} "
@@ -418,6 +433,10 @@ def main() -> None:
         help="Proceed even if the jsonl/success ratio is below threshold. "
              "Default is to ABORT after collection finishes.",
     )
+    p.add_argument(
+        "--stream_output", action="store_true",
+        help="Print each TS codeAgent subprocess stdout/stderr while it runs.",
+    )
     args = p.parse_args()
 
     asyncio.run(
@@ -435,6 +454,7 @@ def main() -> None:
             allow_append=args.allow_append,
             min_jsonl_success_ratio=args.min_jsonl_success_ratio,
             allow_low_jsonl_success_ratio=args.allow_low_jsonl_success_ratio,
+            stream_output=args.stream_output,
         )
     )
 
