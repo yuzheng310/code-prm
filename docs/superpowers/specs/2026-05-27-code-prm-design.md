@@ -204,7 +204,7 @@ $$\mathcal{L} = \frac{1}{\sum_i m_i} \sum_i m_i \cdot (r_i - y_i)^2$$
 
 **算法**:
 - 对每条 outcome=1 的训练 trajectory,对其中**有工具调用的 step**(忽略纯 thought)做 K=4 次 LLM-judge call
-- LLM(Claude Haiku)接收 trajectory prefix,被要求预测"final outcome PASS/FAIL"
+- LLM(Claude Opus,via DeepSeek 映射为 V4-Pro)接收 trajectory prefix,被要求预测"final outcome PASS/FAIL"。Judge 比 policy(Sonnet→V4-Flash)更强,避免 self-evaluation 偏差(Math-Shepherd 经典 "大模型 supervise 小模型" 设置)
 - `step_label_i = (K 次 judge 中预测 PASS 的数) / K`
 - outcome=0 的 trajectory:整条按 `step_label = 0` 标(outcome-only 简化,避免噪声)
 - 输出 trajectory 标注 `label_method = "llm_judge"`

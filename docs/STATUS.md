@@ -23,6 +23,8 @@ Phase 1 plan:`docs/superpowers/plans/2026-05-27-code-prm-phase1-foundation.md`
 | 任务集 | **只用 BigCodeBench-Hard** | SWE-bench 要 docker harness,Phase 2 future work |
 | TS Agent | `yuzheng310/pi`(fork of earendil-works/pi) | hooks 系统干净,免侵入 |
 | LLM 后端 | DeepSeek Anthropic 兼容端点 | API key 限制,直连 Anthropic 403。`claude-*` 模型名自动映射到 `deepseek-v4-flash/pro` |
+| Collection 模型 | `claude-sonnet-4-5` → `deepseek-v4-flash` | 便宜的策略模型 |
+| **Judge 模型** | **`claude-opus-4-7` → `deepseek-v4-pro`** | **避免 self-evaluation 偏差**(judge 比 policy 强,Math-Shepherd 经典设置)。早期用 haiku→flash 时 mean 偏低(0.276,61% 全 0),换 opus→pro 期望 mean 上移 |
 | 数据语义 | **诚实命名**:`label_method` 区分 `llm_judge` / `outcome_zero_simplification` / 未来 `mc_rollout` / `ground_truth` | 防止下游报告写"MC labels"被戳穿 |
 
 ---

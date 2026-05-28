@@ -82,8 +82,16 @@ def main() -> None:
     p.add_argument("--K", type=int, default=4, help="LLM-judge calls per step")
     p.add_argument(
         "--model",
-        default="claude-haiku-4-5",
-        help="Anthropic model used for the LLM-judge rollouts",
+        default="claude-opus-4-7",
+        help=(
+            "Anthropic model used for the LLM-judge. Default "
+            "claude-opus-4-7 — strong judge to avoid same-model "
+            "self-evaluation bias (the collector uses claude-sonnet-4-5). "
+            "Via DeepSeek's Anthropic relay, opus -> deepseek-v4-pro and "
+            "sonnet/haiku -> deepseek-v4-flash, so this is a real model "
+            "differentiation. Override with --model claude-haiku-4-5 for "
+            "cheap exploration."
+        ),
     )
     # task_prompt is critical to LLM-judge label quality. Default threshold
     # matches the Phase 1 exit criterion (≥ 95%).
