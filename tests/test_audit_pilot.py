@@ -112,6 +112,27 @@ def test_audit_flags_unittest_zero_tests_as_harness_error(tmp_path: Path) -> Non
     assert not result.ok
     assert any("0 tests" in error for error in result.errors)
 
+def test_audit_flags_name_error_in_grader_namespace(tmp_path: Path) -> None:
+    record = _record(
+        "task-0",
+        outcome=0,
+        passed=False,
+        stderr_tail=(
+            "Traceback (most recent call last):\n"
+            "  File \"/tmp/work/_bcb_grader_abc.py\", line 8, in test_valid_input\n"
+            "    self.data = pd.DataFrame()\n"
+            "                ^^\n"
+            "NameError: name 'pd' is not defined\n"
+            "Ran 7 tests in 0.003s\n\nFAILED (errors=7)\n"
+        ),
+    )
+    _write_jsonl(tmp_path / "bigcodebench-hard_20260529.jsonl", [record])
+
+    result = audit.audit_dir(tmp_path, expected_count=1, max_tail_chars=400)
+
+    assert not result.ok
+    assert any("NameError in grader namespace" in error for error in result.errors)
+
 
 def test_render_report_contains_compact_row_evidence(tmp_path: Path) -> None:
     records = [

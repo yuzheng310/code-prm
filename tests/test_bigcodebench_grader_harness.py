@@ -16,6 +16,7 @@ class TestAddOne(unittest.TestCase):
 
 def _harness(test_code: str, entry_point: str) -> str:
     return (
+        "from task import *\n"
         f"from task import {entry_point} as task_func\n"
         f"{test_code}\n"
         'if __name__ == "__main__":\n'
@@ -48,10 +49,36 @@ def test_bigcodebench_harness_passes_correct_solution(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert "OK" in result.stderr
 
+def test_bigcodebench_harness_exposes_task_module_globals(tmp_path: Path) -> None:
+    """BigCodeBench tests may reference imports from task.py by name."""
+    test_code = """import unittest
+
+class TestGlobals(unittest.TestCase):
+    def test_path_global(self):
+        self.assertIs(Path, task_func())
+"""
+    (tmp_path / "task.py").write_text(
+        "from pathlib import Path\n\ndef get_path_class():\n    return Path\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "grader.py").write_text(_harness(test_code, "get_path_class"), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "grader.py"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert "OK" in result.stderr
+
 
 def test_trajectory_logger_builds_executable_bigcodebench_harness() -> None:
     source = Path("src/collector/trajectory_logger.ts").read_text(encoding="utf-8")
 
+    assert "from task import *" in source
     assert "from task import ${entryPoint} as task_func" in source
     assert 'if __name__ == "__main__":' in source
     assert "unittest.main()" in source

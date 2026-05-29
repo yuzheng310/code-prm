@@ -118,6 +118,7 @@ function isPythonIdentifier(name: string): boolean {
 
 function buildBigCodeBenchGraderCode(testCode: string, entryPoint: string): string {
   return [
+    "from task import *",
     `from task import ${entryPoint} as task_func`,
     testCode,
     "",

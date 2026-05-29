@@ -80,6 +80,10 @@ def _has_failure_signal(text: str) -> bool:
     return any(signal in text for signal in signals)
 
 
+def _has_grader_namespace_name_error(text: str) -> bool:
+    return "_bcb_grader_" in text and "NameError: name " in text
+
+
 def audit_dir(
     input_dir: Path,
     *,
@@ -153,6 +157,11 @@ def audit_dir(
                 errors.append(f"row {idx} task={task_id}: test_result.command is empty")
             if "Ran 0 tests" in combined_output or "Ran 0 test" in combined_output:
                 errors.append(f"row {idx} task={task_id}: grader reported 0 tests")
+            if _has_grader_namespace_name_error(combined_output):
+                errors.append(
+                    f"row {idx} task={task_id}: NameError in grader namespace; "
+                    "BigCodeBench tests likely reference symbols that must be imported from task.py"
+                )
             if traj.test_result.passed and "OK" not in combined_output:
                 warnings.append(f"row {idx} task={task_id}: passed=True but unittest OK marker not found")
             if not traj.test_result.passed and not _has_failure_signal(combined_output):
