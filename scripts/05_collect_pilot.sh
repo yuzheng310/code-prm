@@ -46,7 +46,7 @@ python -m src.eval.collect_batch \
 echo ""
 echo "=== Pilot done. Inspect: ==="
 echo "  ls -l $LOG_DIR/"
-echo "  python -m src.utils.cost_aggregator --dir $LOG_DIR"
+echo "  python scripts/08_audit_pilot.py --dir $LOG_DIR"
 echo ""
 echo "Verify in the jsonl files:"
 echo "  - every trajectory has test_result"
