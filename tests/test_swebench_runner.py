@@ -5,9 +5,8 @@ test runs in seconds and works without the TS codeAgent installed.
 """
 from __future__ import annotations
 import subprocess
-import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,7 +18,13 @@ def _swe_task() -> dict:
 
 
 def _bigcode_task() -> dict:
-    return {"task_id": "BigCodeBench/0", "prompt": "do thing"}
+    return {
+        "task_id": "BigCodeBench/0",
+        "instruct_prompt": "Return x plus one.",
+        "code_prompt": "def add_one(x: int) -> int:\n    pass\n",
+        "entry_point": "add_one",
+        "test": "import unittest\n\nclass Test(unittest.TestCase):\n    pass\n",
+    }
 
 
 def test_uses_pi_cli_with_prompt_for_swebench(tmp_path: Path, monkeypatch) -> None:
@@ -51,7 +56,7 @@ def test_uses_pi_cli_for_bigcodebench(tmp_path: Path, monkeypatch) -> None:
     """BigCodeBench task: env still tagged bigcodebench-hard."""
     captured: dict = {}
 
-    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None):
+    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None, cwd=None):
         captured["cmd"] = cmd
         captured["env"] = env
         return MagicMock(returncode=0)
@@ -62,8 +67,65 @@ def test_uses_pi_cli_for_bigcodebench(tmp_path: Path, monkeypatch) -> None:
     )
     assert status == "ok"
     p_idx = captured["cmd"].index("-p")
-    assert captured["cmd"][p_idx + 1] == "do thing"  # the prompt
+    prompt = captured["cmd"][p_idx + 1]
+    assert "task.py" in prompt
+    assert "entry point `add_one`" in prompt
     assert captured["env"]["CODE_PRM_TASK_TYPE"] == "bigcodebench-hard"
+
+
+def test_bigcodebench_prompt_includes_code_prompt_and_entry_point(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """BigCodeBench prompt must tell pi the exact stub and import target."""
+    captured: dict = {}
+
+    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None, cwd=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        captured["cwd"] = cwd
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    swebench_runner.run_task_with_codeagent(
+        _bigcode_task(),
+        tmp_path / "ts_repo",
+        tmp_path / "logs",
+    )
+
+    p_idx = captured["cmd"].index("-p")
+    prompt = captured["cmd"][p_idx + 1]
+    assert "task.py" in prompt
+    assert "entry point `add_one`" in prompt
+    assert "def add_one(x: int) -> int:" in prompt
+    assert "Return x plus one." in prompt
+
+
+def test_bigcodebench_subprocess_uses_rollout_specific_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Concurrent BigCodeBench rollouts must not share task.py or grader files."""
+    captured: dict = {}
+
+    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None, cwd=None):
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    swebench_runner.run_task_with_codeagent(
+        _bigcode_task(),
+        tmp_path / "ts_repo",
+        tmp_path / "logs",
+        extra_env={"CODE_PRM_ROLLOUT_ID": "7", "CODE_PRM_RUN_ID": "run-abc"},
+    )
+
+    cwd = Path(captured["cwd"])
+    assert cwd.is_dir()
+    assert cwd.parent.name == "_workdirs"
+    assert "BigCodeBench_0" in cwd.name
+    assert "rollout_7" in cwd.name
+    assert "run_abc" in cwd.name
+    assert captured["env"]["CODE_PRM_WORK_DIR"] == str(cwd)
 
 
 def test_falls_back_to_placeholder_prompt_when_missing(tmp_path: Path, monkeypatch) -> None:
@@ -71,7 +133,7 @@ def test_falls_back_to_placeholder_prompt_when_missing(tmp_path: Path, monkeypat
     'Solve task X' placeholder rather than crashing."""
     captured: dict = {}
 
-    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None):
+    def fake_run(cmd, env=None, capture_output=None, text=None, timeout=None, cwd=None):
         captured["cmd"] = cmd
         return MagicMock(returncode=0)
 

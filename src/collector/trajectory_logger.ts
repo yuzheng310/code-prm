@@ -112,6 +112,21 @@ function inferTaskPrompt(task: Record<string, unknown>): string | null {
   return null;
 }
 
+function isPythonIdentifier(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+function buildBigCodeBenchGraderCode(testCode: string, entryPoint: string): string {
+  return [
+    `from task import ${entryPoint} as task_func`,
+    testCode,
+    "",
+    'if __name__ == "__main__":',
+    "    unittest.main()",
+    "",
+  ].join("\n");
+}
+
 async function runBigCodeBenchGrader(
   traj: Trajectory,
   pi: ExtensionAPI,
@@ -136,13 +151,20 @@ async function runBigCodeBenchGrader(
     task_id?: string;
   };
   const testCode = meta.test ?? "";
+  const entryPoint = meta.entry_point ?? "";
   const testFile = path.join(
     process.cwd(),
     `_bcb_grader_${traj.run_id || "anon"}.py`,
   );
   const t0 = Date.now();
   try {
-    fs.writeFileSync(testFile, testCode);
+    if (!testCode) {
+      throw new Error("BigCodeBench task is missing test code");
+    }
+    if (!entryPoint || !isPythonIdentifier(entryPoint)) {
+      throw new Error(`Invalid BigCodeBench entry_point: ${entryPoint || "<missing>"}`);
+    }
+    fs.writeFileSync(testFile, buildBigCodeBenchGraderCode(testCode, entryPoint));
     // 60s wall-clock timeout — most BigCodeBench tests run in seconds.
     // Use unittest discovery on the single file.
     const { stdout, stderr, code } = await pi.exec(

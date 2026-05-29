@@ -349,6 +349,21 @@ async def collect(
     print(tracker)
     print(stats)
 
+    # If the batch was aborted due to a config-bug signal (launch_error or
+    # all early attempts failing), surface that primary failure to the shell.
+    # Do this before jsonl sanity checks so the secondary "zero successful
+    # runs" guard cannot mask the more specific exit code.
+    if abort_flag["set"] and abort_flag["reason"] in {
+        "launch_error",
+        "max_initial_failed_attempts",
+    }:
+        print(
+            f"\n[FATAL] Batch aborted due to {abort_flag['reason']}. "
+            "This signals a config bug, not transient task failure. "
+            "Exiting non-zero."
+        )
+        raise SystemExit(4)
+
     # Sanity-check that the TS side actually wrote jsonl lines.
     # `stats.succeeded` only counts subprocess exit code 0 — the TS logger
     # might still not have written anything (CODE_PRM_LOG_DIR ignored,
@@ -398,20 +413,6 @@ async def collect(
         "    python -m src.utils.cost_aggregator --dir " + str(log_dir)
     )
 
-    # If the batch was aborted due to a config-bug signal (launch_error or
-    # all early attempts failing), surface that to the shell as non-zero
-    # exit. Otherwise this function returns normally and the caller sees
-    # exit code 0 — misleading when nothing actually worked.
-    if abort_flag["set"] and abort_flag["reason"] in {
-        "launch_error",
-        "max_initial_failed_attempts",
-    }:
-        print(
-            f"\n[FATAL] Batch aborted due to {abort_flag['reason']}. "
-            "This signals a config bug, not transient task failure. "
-            "Exiting non-zero."
-        )
-        raise SystemExit(4)
 
     return tracker, stats
 

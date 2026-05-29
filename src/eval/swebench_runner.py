@@ -31,6 +31,35 @@ from pathlib import Path
 from typing import Any, IO, Literal
 
 
+def _safe_path_component(value: Any) -> str:
+    text = str(value)
+    safe = "".join(ch if (ch.isalnum() or ch in {"_", "."}) else "_" for ch in text)
+    return safe.strip("._") or "unknown"
+
+
+def _bigcodebench_prompt(task: dict[str, Any], task_id: str) -> str:
+    instruction = task.get("instruct_prompt") or task.get("prompt") or f"Solve task {task_id}"
+    code_prompt = task.get("code_prompt")
+    entry_point = task.get("entry_point")
+
+    parts = [
+        "IMPORTANT: Write your final solution to a file named `task.py` "
+        "in the current working directory.",
+    ]
+    if isinstance(entry_point, str) and entry_point:
+        parts.append(
+            f"The grader imports your solution as `from task import {entry_point}`; "
+            f"implement entry point `{entry_point}` exactly."
+        )
+    else:
+        parts.append("The grader imports your solution from `task.py`.")
+    parts.append("")
+    parts.append(str(instruction))
+    if isinstance(code_prompt, str) and code_prompt:
+        parts.extend(["", "Use this exact function signature/stub:", "```python", code_prompt, "```"])
+    return "\n".join(parts)
+
+
 # Process-level launch outcome. NOT the same as agent-task pass/fail.
 # - "ok"           — subprocess exited 0 (TS side ran to completion)
 # - "failed"       — subprocess exited non-zero (TS side error)
@@ -93,6 +122,8 @@ def run_task_with_codeagent(
         (e.g. `node` binary missing or TS repo not built).
     """
     log_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = log_dir.resolve()
+    ts_repo = ts_repo.resolve()
 
     # SWE-bench uses `instance_id`; BigCodeBench uses `task_id`.
     if "instance_id" in task:
@@ -116,35 +147,36 @@ def run_task_with_codeagent(
     if extra_env:
         env.update(extra_env)
 
+    work_dir: Path | None = None
+    if task_type == "bigcodebench-hard":
+        rollout_id = env.get("CODE_PRM_ROLLOUT_ID", "0")
+        run_id = env.get("CODE_PRM_RUN_ID", "run")
+        work_dir = (
+            log_dir
+            / "_workdirs"
+            / (
+                f"{_safe_path_component(task_id)}"
+                f"__rollout_{_safe_path_component(rollout_id)}"
+                f"__{_safe_path_component(run_id)}"
+            )
+        )
+        work_dir.mkdir(parents=True, exist_ok=True)
+        env["CODE_PRM_WORK_DIR"] = str(work_dir)
+        problem_text = _bigcodebench_prompt(task, str(task_id))
+    else:
+        problem_text = (
+            task.get("problem_statement")
+            or task.get("prompt")
+            or task.get("instruct_prompt")
+            or f"Solve task {task_id}"
+        )
+
     # The default target is pi (github.com/earendil-works/pi) — pi's CLI is
     # `node <pi-coding-agent>/dist/cli.js`. Set TS_REPO_PATH to point at
     # `<pi-clone>/packages/coding-agent`. For a different agent, override
     # this argv construction; the rest of the pipeline only depends on the
     # subprocess writing a trajectory line to $CODE_PRM_LOG_DIR per
     # ts_logger_spec.md.
-    #
-    # The first arg after dist/cli.js is the prompt for pi. We pass the
-    # problem statement (or BigCodeBench prompt) extracted in the env so the
-    # agent has something to solve.
-    problem_text = (
-        task.get("problem_statement")
-        or task.get("prompt")
-        or task.get("instruct_prompt")
-        or f"Solve task {task_id}"
-    )
-
-    # For BigCodeBench tasks, tell the agent where to write the solution so
-    # the grader (trajectory_logger.ts → runBigCodeBenchGrader) can find it.
-    # The BigCodeBench `test` field expects `from task import <entry_point>`,
-    # so the canonical filename is `task.py`.
-    if task_type == "bigcodebench-hard":
-        problem_text = (
-            "IMPORTANT: Write your final solution to a file named `task.py` "
-            "in the current working directory. The grader imports your "
-            "solution as `from task import <function_name>`.\n\n"
-            + problem_text
-        )
-
     cmd = [
         "node",
         str(ts_repo / "dist" / "cli.js"),
@@ -153,16 +185,18 @@ def run_task_with_codeagent(
 
     try:
         if stream_output:
-            rollout_id = (extra_env or {}).get("CODE_PRM_ROLLOUT_ID", "0")
+            rollout_id = env.get("CODE_PRM_ROLLOUT_ID", "0")
             return _run_streaming_subprocess(
                 cmd=cmd,
                 env=env,
                 timeout_sec=timeout_sec,
                 output_prefix=f"{task_id} rollout={rollout_id}",
+                cwd=work_dir,
             )
-        result = subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=timeout_sec,
-        )
+        run_kwargs = dict(env=env, capture_output=True, text=True, timeout=timeout_sec)
+        if work_dir is not None:
+            run_kwargs["cwd"] = work_dir
+        result = subprocess.run(cmd, **run_kwargs)
     except subprocess.TimeoutExpired:
         # Don't crash the batch; per-task timeout is recoverable.
         return "timeout"
@@ -178,6 +212,7 @@ def _run_streaming_subprocess(
     env: dict[str, str],
     timeout_sec: int,
     output_prefix: str,
+    cwd: Path | None = None,
 ) -> TaskRunStatus:
     """Run a subprocess while streaming stdout/stderr with task context."""
 
@@ -191,14 +226,16 @@ def _run_streaming_subprocess(
             pipe.close()
 
     try:
-        proc = subprocess.Popen(
-            cmd,
+        popen_kwargs = dict(
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
+        if cwd is not None:
+            popen_kwargs["cwd"] = cwd
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except (FileNotFoundError, PermissionError, OSError):
         return "launch_error"
 
@@ -233,7 +270,7 @@ if __name__ == "__main__":
     if tasks:
         first = tasks[0]
         print(f"First SWE-bench instance: {first.get('instance_id', '<missing>')}")
-        print(f"Problem statement (first 200 chars):")
+        print("Problem statement (first 200 chars):")
         print((first.get("problem_statement", "") or "")[:200])
 
     print()

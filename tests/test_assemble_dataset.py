@@ -4,9 +4,10 @@ We don't shell out to the script; we import its functions directly.
 """
 from __future__ import annotations
 import importlib.util
+import sys
 from pathlib import Path
 
-from src.labeler.trajectory_schema import Step, TokenUsage, Trajectory
+from src.labeler.trajectory_schema import Step, Trajectory
 
 
 # --- import the script as a module ---
@@ -19,6 +20,7 @@ def _load_assemble_module():
     spec = importlib.util.spec_from_file_location("assemble_dataset", _SCRIPT_PATH)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -45,8 +47,8 @@ def _traj(
         Step(step=2, tool="bash", tool_args={"cmd": "pytest"}, tool_result="ok"),
     ]
     if step_labels is not None:
-        for s, l in zip(steps, step_labels):
-            s.step_label = l
+        for step, label in zip(steps, step_labels):
+            step.step_label = label
     raw: dict = {
         "task_id": task_id,
         "task_type": "swe-bench-lite",
