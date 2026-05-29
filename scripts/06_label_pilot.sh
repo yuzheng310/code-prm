@@ -28,33 +28,5 @@ python -m src.labeler.label_all \
     --allow_low_task_prompt_coverage
 
 echo ""
-echo "=== Pilot labeling done. Distribution check: ==="
-python -c "
-import json, statistics
-from collections import Counter
-labels = []
-methods = Counter()
-n_traj = 0
-import glob
-for f in glob.glob('data/labeled/pilot/*.jsonl'):
-    for line in open(f):
-        t = json.loads(line)
-        n_traj += 1
-        methods[t.get('label_method')] += 1
-        for s in t['trajectory']:
-            if s.get('step_label') is not None:
-                labels.append(s['step_label'])
-print(f'  trajectories: {n_traj}')
-print(f'  label_method breakdown: {dict(methods)}')
-print(f'  total labeled steps: {len(labels)}')
-if labels:
-    print(f'  mean step_label: {statistics.mean(labels):.3f}')
-    print(f'  median: {statistics.median(labels):.3f}')
-    bins = Counter()
-    for x in labels:
-        bins[round(x * 4) / 4] += 1
-    print(f'  distribution (rounded to 0.25): {dict(sorted(bins.items()))}')
-"
-echo ""
-echo "If mean ∈ [0.3, 0.7] and >= 2 distinct values, distribution is healthy."
-echo "Next step: full collection (bash scripts/11_collect_bigcodebench.sh)"
+echo "=== Pilot labeling done. Audit: ==="
+echo "  python scripts/09_audit_labeled_pilot.py --dir ${PILOT_LABELED_DIR:-data/labeled/pilot}"
