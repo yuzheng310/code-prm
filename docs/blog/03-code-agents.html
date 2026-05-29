@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 篇 · 把 PRM 搬到代码 Agent</title>
+<link rel="stylesheet" href="style.css">
+<script>MathJax = {tex: {inlineMath: [['$','$'],['\\(','\\)']]}};</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html" class="active"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">第 3 篇 · 核心论点</span>
+    <h1>把 PRM 搬到代码 Agent</h1>
+    <p class="lede">PRM 是在「数学解题」上证明的。把它搬到「多轮代码 Agent」上,不是简单换个数据集——「一步」的定义变了,而且要直面一个尖锐的质疑:DeepSeek-R1 明确说过「我们放弃了 PRM」。这一篇讲清楚为什么代码 Agent 反而是过程监督更合适的场景,以及这背后那个能撑起半场面试的论点。</p>
+  </header>
+
+  <h2><span class="h-num">3.1</span>代码 Agent 的轨迹长什么样</h2>
+  <p>数学题的「过程」是一串文字推理(CoT,思维链),一步 = 一行推导。但一个<strong>代码 Agent</strong> 解决任务时,产生的是一条<span class="term">多轮工具调用轨迹 (multi-turn tool-use trajectory)</span>:</p>
+
+  <div class="figure">
+<pre>
+任务:实现 task.py 里的 parse_config 函数,让单元测试通过
+
+Step 0  thought: 我先看看测试想要什么
+        tool: read_file(tests.py)        → 读到测试代码
+Step 1  thought: 需要处理 YAML,先看现有结构
+        tool: read_file(task.py)         → 看到空函数
+Step 2  tool: write_file(task.py, "...") → 写下第一版实现
+Step 3  tool: run_bash("python -m pytest")→ 3 个测试挂了 2 个
+Step 4  thought: 边界情况没处理
+        tool: edit_file(task.py, "...")  → 修补
+Step 5  tool: run_bash("python -m pytest")→ 全过 ✓
+        → outcome = 1
+</pre>
+    <div class="caption">一条代码 Agent 轨迹。每个 Step 是一次「想法 + 工具调用 + 工具返回」。这正是 <code>trajectory_schema.py</code> 里的 <code>Step</code> 结构。</div>
+  </div>
+
+  <div class="callout def">
+    <span class="c-title">名词解释:在代码 Agent 里,「一步」= 一次工具调用</span>
+    <p>这是一个<strong>设计选择,不是天经地义的</strong>。你也可以定义「一步 = 一个 token」或「一步 = 一整轮对话」。本项目定义为「一次 tool call」(<code>read_file</code> / <code>write_file</code> / <code>run_bash</code> …)。纯思考(没有 tool 的 step)默认不打标签。粒度的选择会影响信号质量——这本身就是个可讨论的研究点。</p>
+  </div>
+
+  <h2><span class="h-num">3.2</span>关键论点:代码 Agent 的中间状态是<u>可验证</u>的</h2>
+  <p>这是整个项目最重要的一句话,请慢读。</p>
+  <p>回忆第 2 篇:PRM 的标签来自「从这一步出发最终能成功的概率」。这要求你能<strong>判断成功</strong>。在数学里,只有走到最后才能对答案——中间步骤没有客观的「对错」可言(一步推导是否「好」本身就模糊)。</p>
+  <p>但代码 Agent 不一样。它的中间状态有大量<strong>客观、可机器验证</strong>的信号:</p>
+  <ul>
+    <li>这一步写的代码<strong>能不能跑</strong>(语法/import 错误立刻暴露)?</li>
+    <li>跑测试<strong>过了几个</strong>(从挂 2 个到挂 0 个,是看得见的进展)?</li>
+    <li>文件<strong>改对地方了吗</strong>(diff 可检查)?</li>
+  </ul>
+
+  <div class="callout insight">
+    <span class="c-title">核心论点(请背下来)</span>
+    <p>数学推理的「步」缺乏客观的中间正确性,所以过程监督在那里又贵又噪;<strong>而代码 Agent 的中间状态天然可验证(能跑吗、测试过吗、改对吗),所以过程监督在代码场景里更可行、也更值得做。</strong></p>
+  </div>
+
+  <h2><span class="h-num">3.3</span>必须正面回答:「DeepSeek-R1 不是放弃 PRM 了吗?」</h2>
+  <div class="callout interview">
+    <span class="c-title">面试视角:这是必考题</span>
+    <p>任何懂 RL 的面试官看到你做 code PRM,第一反应就是:「DeepSeek-R1 的技术报告里明说试过 PRM 然后放弃了,你为什么还做?」<strong>答不上来 = 当场出局。答得好 = 直接证明你读懂了领域。</strong></p>
+  </div>
+
+  <p>先把 R1 的理由摆出来(它说得没错):DeepSeek-R1 报告中放弃 PRM 的三条理由是——</p>
+  <ol>
+    <li><strong>难以定义细粒度的「步」</strong>:在一般推理里,一步到底是什么,边界模糊。</li>
+    <li><strong>难以判断中间步的对错</strong>:自动标注不准,人工标注不可规模化。</li>
+    <li><strong>容易 reward hacking</strong>:模型会学会「讨好」PRM 而非真正解决问题;且 PRM 要反复重训,工程开销大。</li>
+  </ol>
+  <p>然后给出你的反驳——注意,<strong>不是说 R1 错了,而是说它的结论限定在「纯推理」场景</strong>:</p>
+
+  <div class="callout insight">
+    <span class="c-title">你的反驳</span>
+    <p>R1 的三条理由,在<strong>代码 Agent</strong> 上都被显著削弱:</p>
+    <p>① 步的定义在 agent 里是天然的——<strong>一次工具调用</strong>就是一步,边界清晰。<br>
+    ② 中间步的对错有客观抓手——<strong>代码能不能跑、测试过几个</strong>,不全靠模型瞎猜。<br>
+    ③ reward hacking 的空间更小——因为最终还有<strong>真实测试</strong>这个不可造假的 outcome 兜底。<br>
+    所以:<em>R1 在纯推理放弃 PRM 是合理的;但这恰恰反过来说明,中间状态可验证的代码 Agent,正是过程监督值得重新尝试的地方。</em></p>
+  </div>
+
+  <h2><span class="h-num">3.4</span>第二个趋势:用 LLM 当判官(GenRM)</h2>
+  <p>第 2 篇说本项目把「真 rollout」换成了「让一个 LLM 判官预测会不会成功」。这听起来像偷懒,但其实踩在一条正经的学术趋势上,叫 <span class="term">GenRM</span>(Generative Reward Model / Generative Verifier,Zhang et al., 2024)。</p>
+
+  <div class="callout def">
+    <span class="c-title">名词解释:GenRM(生成式奖励模型)</span>
+    <p>传统 RM 是「输入文本 → 输出一个分数」(判别式)。GenRM 反其道:把「判断好坏」当成一个<strong>生成任务</strong>——让一个 LLM 直接<em>说出</em>「这个对/错」「Yes/No」,再用它生成 "Yes" 的概率当分数。好处:能复用 LLM 的推理能力、能写出判断理由(chain-of-thought 式验证)、不需要专门训一个判别头。</p>
+  </div>
+
+  <p>看你项目的 judge prompt(<code>_build_continuation_prompt</code>):它把「问题 + 到目前为止的轨迹」喂给 LLM,要求它回一行 <code>OUTCOME: PASS</code> 或 <code>OUTCOME: FAIL</code>,可选附理由。然后跑 K 次,数 PASS 的比例。<strong>这就是一个 GenRM 风格的过程价值估计器。</strong></p>
+
+  <div class="callout interview">
+    <span class="c-title">面试视角:把「偷懒」讲成「趋势」</span>
+    <p>不要说「我用 LLM judge 是因为真 rollout 太麻烦」。要说:<strong>「我采用了一个 GenRM 风格的生成式判官作为过程价值的代理估计器(surrogate),用 K 次采样的 PASS 比例作为 soft label,这与 Zhang et al. 的 Generative Verifier 路线一致;它牺牲了一定的标签保真度,换取了数量级的成本下降。」</strong> 同一件事,后一种讲法立刻显出你知道自己在做什么。</p>
+  </div>
+
+  <h2><span class="h-num">3.5</span>但要诚实:LLM-judge ≠ 真 rollout</h2>
+  <p>必须知道代价,否则面试官追问会露馅。<code>step_labeler.py</code> 的文档注释自己写得很清楚:</p>
+  <blockquote>THIS IS NOT MONTE-CARLO ROLLOUT. … This module's surrogate is much cheaper but is a WEAK SUPERVISION signal biased by the judge's calibration.</blockquote>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th></th><th>真 MC rollout</th><th>本项目 LLM-judge 代理</th></tr></thead>
+    <tbody>
+      <tr><td>怎么估成功率</td><td>真的从该步重跑 agent + 跑真实测试 K 次</td><td>让 judge <em>预测</em>会不会成功 K 次</td></tr>
+      <tr><td>需要</td><td>恢复状态(repo 快照)+ 沙箱重执行</td><td>只要把前缀文本喂给 API</td></tr>
+      <tr><td>成本</td><td>极高(每步要跑 agent+测试)</td><td>低(几次 API 调用)</td></tr>
+      <tr><td>偏差来源</td><td>采样方差(可控)</td><td><strong>judge 自身的校准偏差</strong>(不可控,需验证)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>schema 里特意保留了 <code>repo / base_commit / final_diff</code> 这些「replay 字段」,就是为了 Phase 2 有能力升级到真 MC rollout——<code>label_method</code> 会从 <code>"llm_judge"</code> 改成 <code>"mc_rollout"</code>,字段语义不变。这种「为未来留接口 + 诚实标注当前方法」的设计,本身是工程成熟度的体现。</p>
+
+  <h2><span class="h-num">3.6</span>本篇小结</h2>
+  <ul>
+    <li>代码 Agent 的轨迹是<strong>多轮工具调用</strong>;本项目定义「一步 = 一次 tool call」。</li>
+    <li>核心论点:<strong>代码 Agent 的中间状态可验证</strong>(能跑/测试过/改对),所以过程监督比在纯推理上更可行。</li>
+    <li>必背:R1 放弃 PRM 是针对<strong>纯推理</strong>(步模糊、难标、易 hack);这三条在代码 Agent 上都被削弱。</li>
+    <li>用 LLM 当判官 = <strong>GenRM</strong> 趋势,把判断当生成任务;本项目的 judge 就是一个 GenRM 式过程价值估计器。</li>
+    <li>但要诚实:LLM-judge 是<strong>代理(surrogate)</strong>,有 judge 校准偏差,不等于真 rollout;schema 已留好升级接口。</li>
+  </ul>
+
+  <nav class="pager">
+    <a href="02-process-reward.html">
+      <div class="dir">← 上一篇</div>
+      <div class="ttl">第 2 篇 · 过程奖励模型</div>
+    </a>
+    <a class="next" href="04-this-project.html">
+      <div class="dir">下一篇 →</div>
+      <div class="ttl">第 4 篇 · 这个项目的 Phase 1</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

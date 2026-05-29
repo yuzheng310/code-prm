@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 篇 · 深度、批判与求职</title>
+<link rel="stylesheet" href="style.css">
+<script>MathJax = {tex: {inlineMath: [['$','$'],['\\(','\\)']]}};</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html" class="active"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">第 6 篇 · 深度与求职</span>
+    <h1>深度、批判与求职</h1>
+    <p class="lede">前五篇让你「懂」。这一篇让你「能在面试里赢」。把项目里那些被简化掉的、有风险的、可质疑的点全部摊开,逐个给出「面试官会怎么问 / 你怎么答 / 怎么补成真深度」。一个能批判自己项目的人,远比一个只会夸自己项目的人可信。</p>
+  </header>
+
+  <h2><span class="h-num">6.1</span>残酷的前提:Phase 1 不补你的短板</h2>
+  <p>你的目标是字节 Seed 的 Reward / Agent 算法岗,自评短板是<strong>没有 ML 训练经验</strong>。要清醒地认识到:<strong>Phase 1 一行训练代码都没有。</strong> 不管采集/labeling 管道多漂亮,它在结构上无法弥补「没训过模型」这个短板。真正补短板的是 <strong>Phase 2(你真的训了一个 PRM)</strong> 和 <strong>Phase 3(它真的有用)</strong>。</p>
+  <div class="callout insight">
+    <span class="c-title">但 Phase 1 对 Reward 岗有一个独特价值</span>
+    <p>Reward modeling 这个方向,<strong>数据质量和标签噪声就是一切</strong>。同一个 Phase 1,当「管道」做一文不值,当「奖励数据质量研究」做就正中要害。区别只在于:你有没有<strong>量化、验证、批判</strong>你自己的标签。下面几节就是教你把 Phase 1 从前者升级成后者。</p>
+  </div>
+
+  <h2><span class="h-num">6.2</span>批判点一:outcome_zero 简化注入了标签噪声</h2>
+  <p>回忆第 2/4 篇:失败轨迹(outcome=0)的每个 tool step 都被直接标 0。问题显而易见:</p>
+  <blockquote>一条最终失败的轨迹,前面 8 步可能完全正确,只是第 9 步崩了。把前 8 步也标 0,等于<strong>告诉模型「这些好步是坏的」</strong>——这是系统性的标签噪声。</blockquote>
+  <div class="callout interview">
+    <span class="c-title">面试官会问 / 你怎么答</span>
+    <p><strong>问:</strong>「失败轨迹里正确的中间步你也标 0,不怕训出错误信号吗?」</p>
+    <p><strong>答(诚实 + 有方案):</strong>「会引入噪声,这是 Math-Shepherd outcome-only 简化的已知弱点。我之所以先这么做,是因为它把失败路径的 API 成本降到 0;但我清楚它的代价,所以(a)我用 <code>label_method</code> 显式标记了这批是简化标签,可在 ablation 里单独剔除;(b)Phase 2 的对比实验之一就是『失败轨迹也跑 judge』vs『直接标 0』对 Best-of-N 的影响。」</p>
+  </div>
+
+  <h2><span class="h-num">6.3</span>批判点二:LLM-judge 没被验证过(最该补的实验)</h2>
+  <p>这是<strong>对 Reward 方向最致命的缺口</strong>:你用 judge 的 PASS 比例当 step 价值,但你<strong>从没验证过 judge 估的准不准</strong>。「你怎么知道你的奖励信号是对的」是这个方向的第一问。</p>
+  <div class="callout deep">
+    <span class="c-title">补法:surrogate 验证实验(便宜、出硬数字)</span>
+    <p>挑一个小子集(比如 20 条轨迹、~150 个 step),对这些 step <strong>真的</strong>跑一次蒙特卡洛 rollout(从该步重启 agent + 跑真实测试 N 次),得到「真值」step 价值。然后量两者的一致性:</p>
+    <ul>
+      <li><strong>Pearson / Spearman 相关系数</strong>:judge 分数 vs 真 rollout 分数,$\rho$ 多少?</li>
+      <li><strong>AUC</strong>:用 judge 分数预测「真 rollout ≥ 0.5」的能力。</li>
+      <li><strong>校准曲线</strong>:judge 说 0.6 的那些步,真实成功率是不是真在 0.6 附近?</li>
+    </ul>
+    <p>这给你一句硬话:<em>「我用 N=8 的真 MC rollout 在 20 条轨迹上验证了 LLM-judge 代理,二者 Spearman ρ=0.X,校准在 [0.3,0.7] 区间良好、两端偏乐观。」</em> 这一句直接把「偷懒的 surrogate」变成「被验证过、知道边界的 surrogate」——这是研究员和工程师的分水岭。</p>
+  </div>
+
+  <h2><span class="h-num">6.4</span>批判点三:reward hacking</h2>
+  <div class="callout def">
+    <span class="c-title">名词解释:reward hacking(奖励钻空子)</span>
+    <p>策略模型学会「讨好奖励模型」而非真正解决问题。比如 PRM 偏爱「先读很多文件再动手」,策略就学会狂读文件刷高分,哪怕没用。这是 R1 放弃 PRM 的理由之一,也是 Reward 方向的经典议题。</p>
+  </div>
+  <div class="callout interview">
+    <span class="c-title">你怎么答</span>
+    <p>「代码场景对 reward hacking 有天然防线:最终还有<strong>真实测试</strong>这个不可造假的 outcome 兜底,PRM 只用在 Best-of-N 的候选重排,不直接做长程 RL 优化,所以被 hack 的暴露面小。如果未来上 RL,我会监控『PRM 分数涨但真实 pass 率不涨』这个背离信号——那就是 hacking 的指纹。」</p>
+  </div>
+
+  <h2><span class="h-num">6.5</span>批判点四:数据太小(148 个任务)</h2>
+  <p>BigCodeBench-Hard v0.1.4 只有 148 个任务。要凑到约 1200 条轨迹得每题 8 个 rollout。这对训一个稳健的 PRM 是偏小的。但你手里有张好牌:<code>data/prm800k/</code>(80 万条数学步骤标签)。</p>
+  <div class="callout insight">
+    <span class="c-title">把数据荒变成一个研究问题:跨域迁移</span>
+    <p>提出问题:<strong>「过程奖励能跨域迁移吗?——在数学(PRM800K)上训的 PRM,在代码 Agent 上还管用吗?」</strong> 这一个 ablation 同时解决三件事:① 绕开 148 的数据荒(用海量数学数据预热);② 提供一个有研究味道、且当前文献尚无定论的实验;③ 给面试官又一个钩子。可设计成:纯代码训练 vs 数学预热+代码微调 vs 纯数学,对比三者的 Best-of-N。</p>
+  </div>
+
+  <h2><span class="h-num">6.6</span>元问题:PRM 到底值不值得做?</h2>
+  <p>最高级的批判是质疑项目本身的前提。一个诚实的 Phase 3 应该包含一个 baseline:<strong>纯 ORM / 纯 RLVR(只用测试结果,不要过程标签)</strong>。如果你的 PRM 在 Best-of-N 上<em>打不过</em>这个简单 baseline,那就是个有价值的<strong>负面结果</strong>——它印证了 R1 的判断,而你能讲清「在我的设定下,过程监督的收益没有覆盖它的标签噪声成本」。</p>
+  <div class="callout interview">
+    <span class="c-title">面试视角:负面结果也是结果</span>
+    <p>很多人怕做出「PRM 没赢」的结果。但对 Reward 方向,一个<strong>带着清醒分析的负面结论</strong>,比一个「不知道为什么赢了」的正面结论更能体现科学素养。关键是你能不能解释清楚<em>为什么</em>。永远准备好对比 baseline,永远准备好解释结果——无论正负。</p>
+  </div>
+
+  <h2><span class="h-num">6.7</span>把项目讲成一个故事(电梯版)</h2>
+  <div class="callout interview">
+    <span class="c-title">30 秒自述模板</span>
+    <p>「我在做一个面向<strong>代码 Agent 的过程奖励模型</strong>。出发点是:DeepSeek-R1 放弃 PRM 是因为纯推理的『步』太模糊、难标、易 hack——但<strong>代码 Agent 的中间状态是可验证的</strong>(能跑吗、测试过吗),所以过程监督在这里反而成立。我用一个真实的 TS 编码 Agent 采集多轮轨迹,outcome 用 BigCodeBench 官方测试判定,step 标签用一个 <strong>GenRM 风格的 LLM 判官</strong>按 Math-Shepherd 的 soft-estimation 方式生成,并对标签来源做了可审计的标注和 6 道质量闸门。我还用真 MC rollout 在子集上验证了这个代理估计器的校准。最终我训了一个 Qwen-Coder-1.5B + LoRA 的 scalar-head PRM,在 Best-of-N 上把 pass@1 提升了 X%,并和纯 ORM baseline 做了对比。」</p>
+  </div>
+  <p>注意这段话里每个加粗词,都对应前面某一篇的一个知识点。它之所以有说服力,是因为<strong>它既讲了你做了什么,也讲了你为什么这么选、代价是什么、怎么验证的</strong>——这正是 Reward 方向想要的「研究员心态」。</p>
+
+  <h2><span class="h-num">6.8</span>优先级建议</h2>
+  <ol>
+    <li><strong>先修 grader + cwd 隔离</strong>(第 4 篇的两个坑)——outcome 不可信,后面全白搭。</li>
+    <li><strong>尽快推进 Phase 2/3,拿到那个 Best-of-N 数字</strong>——这是补「没训过模型」短板的唯一途径,也是项目价值的落点。</li>
+    <li><strong>做 §6.3 的 surrogate 验证实验</strong>——成本低、对 Reward 岗杀伤力最大。</li>
+    <li><strong>把 §6.5 的数学→代码迁移作为 ablation</strong>——同时解决数据荒和「研究味道」。</li>
+    <li>不要再在 Phase 1 管道的工程精致度上加投入了。够用即可。</li>
+  </ol>
+
+  <hr>
+
+  <h2><span class="h-num">§</span>延伸阅读(按重要性)</h2>
+  <ul class="refs">
+    <li><span class="authors">Lightman et al.</span> (2023). <em>Let's Verify Step by Step.</em> <span class="venue">OpenAI</span> — PRM800K,过程监督的奠基。</li>
+    <li><span class="authors">Wang et al.</span> (2024). <em>Math-Shepherd: Verify and Reinforce LLMs Step-by-step without Human Annotations.</em> — 自动步骤标注,你 step_label 的原型。</li>
+    <li><span class="authors">Uesato et al.</span> (2022). <em>Solving math word problems with process- and outcome-based feedback.</em> <span class="venue">DeepMind</span> — 过程 vs 结果监督的早期系统对比。</li>
+    <li><span class="authors">DeepSeek-AI</span> (2025). <em>DeepSeek-R1.</em> — 公开论述为何放弃 PRM,你必须能回应的那篇。</li>
+    <li><span class="authors">Zhang et al.</span> (2024). <em>Generative Verifiers: Reward Modeling as Next-Token Prediction.</em> — GenRM,你 LLM-judge 的趋势依据。</li>
+    <li><span class="authors">Cobbe et al.</span> (2021). <em>Training Verifiers to Solve Math Word Problems.</em> — GSM8K + Best-of-N verifier 范式。</li>
+    <li><span class="authors">Hu et al.</span> (2021). <em>LoRA: Low-Rank Adaptation of Large Language Models.</em> — 你训练用的省显存方法。</li>
+    <li><span class="authors">Zhuo et al.</span> (2024). <em>BigCodeBench.</em> — 你的任务来源(注意 Hard 子集只有 148 题)。</li>
+    <li><span class="authors">Lambert et al.</span> (2024). <em>Tülu 3.</em> — RLVR 的系统化实践。</li>
+  </ul>
+
+  <div class="callout def" style="margin-top:32px">
+    <span class="c-title">读完之后</span>
+    <p>你现在应该能:从零向别人解释这个领域;对着代码说出每一行的来历;在面试里回应 R1 之问、讲清 GenRM 定位、承认并量化自己的简化代价。剩下的就是把 Phase 2/3 跑出来,让那个 Best-of-N 数字落地。回到 <a href="index.html">总览</a> 或任选一篇重读深水区。</p>
+  </div>
+
+  <nav class="pager">
+    <a href="05-ml-toolkit.html">
+      <div class="dir">← 上一篇</div>
+      <div class="ttl">第 5 篇 · 训练 PRM 的工具箱</div>
+    </a>
+    <a class="next" href="index.html">
+      <div class="dir">回到 →</div>
+      <div class="ttl">总览</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

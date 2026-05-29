@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 篇 · 训练 PRM 的工具箱</title>
+<link rel="stylesheet" href="style.css">
+<script>MathJax = {tex: {inlineMath: [['$','$'],['\\(','\\)']]}};</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html" class="active"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">第 5 篇 · ML 概念补课</span>
+    <h1>训练 PRM 的工具箱</h1>
+    <p class="lede">数据造好了,Phase 2 要把它训成模型。这一篇专门给「没训过模型」的人补齐必备词汇:backbone、scalar head、LoRA、masked MSE、token/step 级监督,以及 Phase 3 怎么用 Best-of-N 证明这个 PRM「真的有用」。这恰好是你简历最缺、面试最该补的一块。</p>
+  </header>
+
+  <h2><span class="h-num">5.1</span>PRM 的模型结构:主干 + 一个标量头</h2>
+  <p>一个 PRM 长这样:拿一个预训练好的 LLM 当 <span class="term">backbone(主干)</span>,把它最后一层输出的隐藏向量,接一个 <span class="term">scalar head(标量头)</span>——一个小小的线性层,把高维向量压成<strong>一个数字</strong>(经 sigmoid 后落在 $[0,1]$)。这个数字就是「这一步的质量分」。</p>
+
+  <div class="figure">
+<pre>
+轨迹文本(题面 + 到第 i 步为止)
+   │
+   ▼   Qwen2.5-Coder-1.5B  (backbone,大部分参数冻结)
+   │   每个 token 输出一个隐藏向量 h
+   │
+   ▼   scalar head  (一个 Linear: 1536维 → 1维)
+   │
+   ▼   sigmoid → 0.62        ← 预测的 step_label
+              ↕ 比对
+           0.625             ← 第 4 篇造的「真值」软标签
+              ↓
+           masked MSE loss → 反向传播,更新参数
+</pre>
+    <div class="caption">PRM = backbone + scalar head。训练就是让预测的分数逼近第 4 篇造的软标签。</div>
+  </div>
+
+  <div class="callout def">
+    <span class="c-title">为什么主干用 Qwen2.5-Coder-1.5B</span>
+    <p>① 它是<strong>代码预训练</strong>模型,天生懂代码,比通用模型更适合判断代码轨迹的好坏。② 1.5B 足够小,能在单张 48GB 显卡上训(项目的 lab box 正是 vGPU-48GB)。奖励模型通常<strong>不需要</strong>和被评估的策略模型一样大——它只做判断,不做生成。</p>
+  </div>
+
+  <h2><span class="h-num">5.2</span>LoRA:不动主干,只训一小撮参数</h2>
+  <div class="callout def">
+    <span class="c-title">名词解释:LoRA(Low-Rank Adaptation,Hu et al. 2021)</span>
+    <p>全量微调一个模型要更新它<em>所有</em>参数,显存和算力都吃不消。LoRA 的做法:<strong>冻结原模型的全部权重</strong>,只在某些层旁边插入两个很小的低秩矩阵 $A、B$,训练时只更新这两个小矩阵。原权重 $W$ 不动,等效权重变成 $W + BA$。因为 $A、B$ 远小于 $W$,要训的参数量可能只有原来的 <strong>0.1%–1%</strong>。</p>
+  </div>
+
+  <div class="callout analogy">
+    <span class="c-title">类比</span>
+    <p>主干模型是一本已经印好的厚字典,全量微调 = 重印整本字典,贵。LoRA = 在字典里夹一叠便利贴做修订,字典本身不动,改动量极小但够用。这就是为什么 1.5B 模型 + LoRA 能在一张消费级/专业级显卡上训起来。</p>
+  </div>
+
+  <h2><span class="h-num">5.3</span>损失函数:masked MSE,以及那个 mask 为什么关键</h2>
+  <p>第 2 篇说过本项目用回归式的 <span class="term">MSE(均方误差)</span> 而非分类交叉熵,因为标签是连续软值。MSE 就是「预测值和真值之差的平方」:</p>
+  <p style="text-align:center">$\text{MSE} = \dfrac{1}{N}\sum_i \big(\hat{y}_i - y_i\big)^2$</p>
+  <p>关键在那个 <span class="term">masked(带掩码)</span>。一条轨迹的文本里有成千上万个 token,但<strong>只有少数位置</strong>是「一步结束、该输出分数」的地方;而且<strong>只有 tool step 有标签</strong>(纯思考步、padding 填充位都没有标签)。mask 的作用就是:</p>
+  <div class="callout insight">
+    <span class="c-title">mask = 「只在有标签的位置算 loss」</span>
+    <p>loss 只在「该打分的那些 step 位置」累加,其它位置(没标签的步、padding)用 mask 置零、不参与。如果不 mask,模型会被一堆没有意义的位置带偏。<strong>这也呼应了第 4 篇 step_labeler 里 <code>only_tool_steps</code> 那个参数</strong>——成功和失败轨迹必须用一致的「只标 tool step」策略,否则纯思考步在两类轨迹里待遇不一致,会悄悄给训练引入偏差(代码注释里专门警告了这点)。</p>
+  </div>
+
+  <div class="callout deep">
+    <span class="c-title">深水区:对比 OpenR 的离散损失</span>
+    <p>开源框架 OpenR 把步骤标签离散成 +/−,用分类交叉熵。问题:0.51 和 0.99 都会被归成「+」,但它俩代表的「把握」天差地别——交叉熵看不到这个差别。masked MSE 直接回归 0.51 / 0.99 原值,信号无损。这是项目 STATUS 决策表「scalar head + masked MSE(VLM-PRM 同源)」那一行背后的理由,也是个能展开讲的设计权衡。</p>
+  </div>
+
+  <h2><span class="h-num">5.4</span>训练完怎么用:Best-of-N</h2>
+  <p>训出 PRM 之后,它有什么用?最直接、也最能出「亮眼数字」的用法叫 <span class="term">Best-of-N</span>(也叫 verifier reranking,验证器重排):</p>
+  <div class="figure">
+<pre>
+对一道新题:
+  1. 让策略模型生成 N 条不同的解题轨迹(N=8 / 16 / 32 …)
+  2. 用训好的 PRM 给每条轨迹打分
+        （常见聚合:取每条轨迹所有步分数的 最小值 或 平均值)
+  3. 选 PRM 分数最高的那一条作为最终答案
+  4. 看这条被选中的,测试过不过
+
+如果「PRM 选出来的」比「随机选一条 / 多数投票」通过率高
+   → 证明 PRM 真的学到了「什么是好轨迹」
+</pre>
+    <div class="caption">Best-of-N:用 PRM 当「评委」从 N 个候选里挑最好的。这是衡量 PRM 价值的标准做法(Cobbe et al. 2021 在 GSM8K 上用的就是这套)。</div>
+  </div>
+
+  <div class="callout def">
+    <span class="c-title">名词解释:pass@k</span>
+    <p>代码评测的标准指标。<strong>pass@1</strong> = 只给一次机会,通过率多少。<strong>pass@k</strong> = 允许 k 次尝试,只要有一次过就算过。Best-of-N 的价值就体现在:它能不能把 pass@1 拉到接近 pass@N 的水平——即「用 PRM 选一条」能不能逼近「N 条里碰运气有一条对」。</p>
+  </div>
+
+  <h2><span class="h-num">5.5</span>怎么评 PRM 本身好不好</h2>
+  <p>Phase 3 会用两类指标:</p>
+  <ul>
+    <li><strong>step-level F1</strong>:把 PRM 预测的连续分数二值化(>0.5 算「好步」),和真值标签比,算 <span class="term">F1</span>(精确率和召回率的调和平均)。衡量「PRM 判断单步好坏」的准头。</li>
+    <li><strong>Best-of-N 的 pass@1 提升</strong>:最重要的<em>下游</em>指标。PRM 选出来的轨迹通过率,相比 baseline(随机 / 多数投票 / ORM)高多少。<strong>这是面试里最值钱的一个数字。</strong></li>
+  </ul>
+
+  <div class="callout interview">
+    <span class="c-title">面试视角:一定要有「下游指标」</span>
+    <p>只报 step-level F1 是不够的——F1 高只说明 PRM 拟合了你那份(可能有噪声的)标签,不代表它真有用。<strong>真正能打动 Reward 方向面试官的,是「我的 PRM 把 Best-of-N 的 pass@1 从 X% 抬到了 Y%,且超过了 ORM baseline」。</strong> 这一句话证明了:你的奖励信号不仅拟合得好,而且能<strong>真正改善策略的最终表现</strong>。整个项目的价值,最终就压在这个数字上。</p>
+  </div>
+
+  <h2><span class="h-num">5.6</span>本篇小结</h2>
+  <ul>
+    <li>PRM = <strong>code backbone(Qwen2.5-Coder-1.5B)+ scalar head</strong>,输出每步 $[0,1]$ 分数。</li>
+    <li><strong>LoRA</strong> 冻结主干、只训低秩小矩阵,让小卡也能训。</li>
+    <li><strong>masked MSE</strong>:软标签用回归;mask 保证只在有标签的 tool step 算 loss,对比 OpenR 离散化更无损。</li>
+    <li>用法:<strong>Best-of-N</strong> 让 PRM 当评委从 N 个候选挑最好;<strong>pass@k</strong> 衡量效果。</li>
+    <li>评测分两层:step-level F1(拟合好不好)+ <strong>Best-of-N pass@1 提升</strong>(真有用吗,最值钱)。</li>
+  </ul>
+
+  <nav class="pager">
+    <a href="04-this-project.html">
+      <div class="dir">← 上一篇</div>
+      <div class="ttl">第 4 篇 · 这个项目的 Phase 1</div>
+    </a>
+    <a class="next" href="06-depth.html">
+      <div class="dir">下一篇 →</div>
+      <div class="ttl">第 6 篇 · 深度、批判与求职</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

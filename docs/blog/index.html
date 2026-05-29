@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code-PRM 技术博客 · 总览</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html" class="active"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">SERIES OVERVIEW</span>
+    <h1>给代码 Agent 训一个<br>过程奖励模型</h1>
+    <p class="lede">这是一份写给「完全没有 ML / RL 经验」的人的技术博客。读完它,你应该能从零理解什么是奖励模型、什么是过程奖励、为什么代码 Agent 是这件事的好场景,以及这个项目的 Phase 1 到底做了什么、哪里值得讲、哪里是坑。</p>
+    <p class="meta">阅读路径:建议按 0 → 6 顺序读。每篇 10–20 分钟。术语首次出现都会解释。</p>
+  </header>
+
+  <div class="callout def">
+    <span class="c-title">一句话项目定义</span>
+    <p><strong>为代码 Agent 的多轮 trajectory(轨迹)训练一个 step-level 的过程奖励模型(Process Reward Model, PRM)</strong> —— 让模型不仅能判断「最后做对没做对」,还能判断「中间每一步走得好不好」。</p>
+  </div>
+
+  <h2><span class="h-num">§</span>为什么要读这份东西</h2>
+  <p>如果你只看项目代码,你会看到一堆 Python、一个 TypeScript extension、几个 shell 脚本,然后得出结论:「这不就是个数据采集管道吗?有什么技术含量?」</p>
+  <p>这个判断<strong>对了一半</strong>。Phase 1 的<em>代码</em>确实大多是工程胶水。但 Phase 1 背后的<em>问题</em>——「怎么给一个长达几十步的 Agent 轨迹的每一步打一个可信的质量分」——是当前大模型对齐(alignment)和强化学习领域真正没解决好的硬问题之一。深度不在管道里,在那些为了省事而被绕过的设计决策里。</p>
+  <p>这份博客就是要把那些「被绕过的东西」一个个讲清楚:它们是什么、学术界怎么做的、你这里怎么简化的、简化的代价是什么。</p>
+
+  <h2><span class="h-num">§</span>读完你能回答这些问题</h2>
+  <ul>
+    <li>大模型为什么需要「奖励模型」?它和预训练、SFT、RLHF 是什么关系?</li>
+    <li>「结果奖励 (ORM)」和「过程奖励 (PRM)」差在哪?为什么后者更难也更香?</li>
+    <li>没有人工标注,怎么自动给每一步打分?(Math-Shepherd 的蒙特卡洛 rollout 思想)</li>
+    <li>为什么 DeepSeek-R1 公开说「我们放弃了 PRM」,而这个项目还要做 PRM?——这个反问的答案,是整个项目最锋利的论点。</li>
+    <li>什么是 LoRA、scalar head、masked MSE、Best-of-N、pass@k、step-level F1?</li>
+    <li>这个项目用 <code>LLM-as-judge</code> 替代真 rollout,踩在了哪条学术趋势上(GenRM)?代价是什么?怎么验证它靠不靠谱?</li>
+  </ul>
+
+  <h2><span class="h-num">§</span>六篇的地图</h2>
+  <div class="card-grid">
+    <a class="card" href="01-foundations.html">
+      <div class="card-num">第 1 篇</div>
+      <div class="card-title">奖励模型基础</div>
+      <div class="card-desc">从「LLM 为什么不懂好坏」讲到 RLHF 三段式、reward model、稀疏奖励、以及代码天然适合的 RLVR。</div>
+    </a>
+    <a class="card" href="02-process-reward.html">
+      <div class="card-num">第 2 篇</div>
+      <div class="card-title">过程奖励模型</div>
+      <div class="card-desc">ORM vs PRM、PRM800K、Math-Shepherd 的自动标注、蒙特卡洛 rollout、credit assignment、软标签。</div>
+    </a>
+    <a class="card" href="03-code-agents.html">
+      <div class="card-num">第 3 篇</div>
+      <div class="card-title">搬到代码 Agent</div>
+      <div class="card-desc">多轮轨迹里「一步」是什么、为什么代码中间状态可验证、R1 放弃 PRM 之辩、GenRM 与 LLM-judge。</div>
+    </a>
+    <a class="card" href="04-this-project.html">
+      <div class="card-num">第 4 篇</div>
+      <div class="card-title">这个项目的 Phase 1</div>
+      <div class="card-desc">架构、数据契约、pi agent hook、BigCodeBench grader、step labeler、6 个 hard check、诚实命名哲学。</div>
+    </a>
+    <a class="card" href="05-ml-toolkit.html">
+      <div class="card-num">第 5 篇</div>
+      <div class="card-title">训练 PRM 的工具箱</div>
+      <div class="card-desc">backbone、scalar head、LoRA、masked MSE、token/step 级监督、Best-of-N 推理、评测指标。</div>
+    </a>
+    <a class="card" href="06-depth.html">
+      <div class="card-num">第 6 篇</div>
+      <div class="card-title">深度、批判与求职</div>
+      <div class="card-desc">标签噪声、surrogate 验证实验、reward hacking、数据稀缺、面试官会问什么、怎么讲这个故事。</div>
+    </a>
+  </div>
+
+  <h2><span class="h-num">§</span>读法建议</h2>
+  <div class="callout insight">
+    <span class="c-title">如果你时间紧</span>
+    <p>先读 <a href="01-foundations.html">第 1 篇</a> 建立词汇,再直接跳 <a href="03-code-agents.html">第 3 篇</a>(项目的核心论点)和 <a href="06-depth.html">第 6 篇</a>(面试弹药)。第 2、4、5 篇是把细节补全的「深水区」,面试前再回来啃。</p>
+  </div>
+  <p>每篇会用这些标记帮你分层:</p>
+  <div class="callout def"><span class="c-title">名词解释</span><p>第一次出现的术语,给一个能记住的定义。</p></div>
+  <div class="callout analogy"><span class="c-title">类比</span><p>用一个生活化或熟悉的场景帮你建立直觉。</p></div>
+  <div class="callout deep"><span class="c-title">深水区</span><p>更技术的细节,看不懂可以先跳过,不影响主线。</p></div>
+  <div class="callout warn"><span class="c-title">坑 / 注意</span><p>这个项目里真实踩过或必须警惕的陷阱。</p></div>
+  <div class="callout interview"><span class="c-title">面试视角</span><p>这一点在字节 Seed 这类 Reward / Agent 算法岗面试里会怎么被问、怎么答。</p></div>
+
+  <nav class="pager">
+    <a class="disabled">&nbsp;</a>
+    <a class="next" href="01-foundations.html">
+      <div class="dir">下一篇 →</div>
+      <div class="ttl">第 1 篇 · 奖励模型基础</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

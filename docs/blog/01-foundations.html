@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 篇 · 奖励模型基础</title>
+<link rel="stylesheet" href="style.css">
+<script>MathJax = {tex: {inlineMath: [['$','$'],['\\(','\\)']]}};</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html" class="active"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">第 1 篇 · 基础</span>
+    <h1>奖励模型基础:从 RLHF 说起</h1>
+    <p class="lede">在谈「过程奖励」之前,得先回答一个更朴素的问题:大模型明明已经会说话了,为什么还需要一个专门的模型来告诉它「什么是好答案」?这一篇把奖励模型放进 RLHF 的全景里,讲清它的位置、训练方式,以及代码任务为什么是个特殊的「免训练奖励」乐土。</p>
+  </header>
+
+  <h2><span class="h-num">1.1</span>预训练模型只会「接话」,不懂「好坏」</h2>
+  <p>一个刚预训练完的大语言模型(LLM),本质上只学会了一件事:<strong>给定前面的一串 token,预测下一个 token 最可能是什么</strong>。它读了整个互联网,所以它知道「中国的首都是」后面大概率接「北京」。</p>
+  <p>但「预测下一个 token」和「给出一个有用、诚实、无害的回答」是两码事。互联网上既有高质量回答,也有胡说八道、有毒、答非所问的内容。模型把它们<em>一起</em>学了。它没有任何内在的「好坏」概念——它只是在模仿语料的分布。</p>
+
+  <div class="callout analogy">
+    <span class="c-title">类比</span>
+    <p>预训练 = 一个读遍了全世界所有书(包括烂书)的人,你问什么他都能接着往下编,而且编得很像那么回事。但他没有「品味」——分不清自己接的这段是金句还是废话。<strong>对齐(alignment)</strong>就是给这个人装上品味。</p>
+  </div>
+
+  <h2><span class="h-num">1.2</span>对齐三段式:SFT → RM → RL</h2>
+  <p>把一个「只会接话」的模型变成「ChatGPT 那样听话」的模型,经典做法叫 <span class="term">RLHF</span>(Reinforcement Learning from Human Feedback,基于人类反馈的强化学习),由 Christiano 等人(2017)提出框架、OpenAI 的 InstructGPT(Ouyang et al., 2022)发扬光大。它分三步:</p>
+
+  <div class="figure">
+<pre>
+①  SFT(监督微调)
+    人写「好答案」示范 → 模型模仿
+    "问:解释一下黑洞。 答:黑洞是……"  ←人工撰写的高质量回答
+
+②  RM(训练奖励模型)        ← 本系列的主角
+    人对模型的多个回答排序 → 训一个模型去模仿这个偏好
+    给 (问题, 回答) 打一个分数:越像人喜欢的越高
+
+③  RL(用奖励模型做强化学习)
+    让 LLM 自己生成回答 → RM 打分 → 用 PPO/GRPO 等算法
+    把「拿高分」的行为强化进 LLM 的参数里
+</pre>
+    <div class="caption">RLHF 三段式。第②步训练的就是「奖励模型」。</div>
+  </div>
+
+  <div class="callout def">
+    <span class="c-title">名词解释:奖励模型 (Reward Model, RM)</span>
+    <p>一个输入「(问题, 回答)」、输出<strong>一个标量分数</strong>的模型。分数越高代表这个回答越符合人类偏好。它本质上是一个回归/打分模型,通常用一个预训练 LLM 当主干、在最后接一个输出单个数字的「头」。</p>
+  </div>
+
+  <p>为什么需要单独训一个 RM,而不是直接让人来打分?因为 RL 阶段模型要生成<strong>几百万次</strong>回答,每次都要一个分数。人打分太慢太贵。于是先用「人排序」的数据训一个 RM,之后让 RM 当「人类品味的廉价自动化替身」,在 RL 里被调用千万次。</p>
+
+  <h2><span class="h-num">1.3</span>奖励模型是怎么训出来的</h2>
+  <p>最经典的方式不是让人直接打绝对分数(「这个答案 7.3 分」——人对绝对分数很不一致),而是让人做<strong>两两比较</strong>:「A 和 B 哪个更好?」然后用 <span class="term">Bradley-Terry 模型</span> 把「偏好对」变成可训练的损失。</p>
+  <p>直觉版本:如果人觉得 A 比 B 好,我们就希望 $r(A) > r(B)$。损失函数鼓励「被偏好的那个,分数比另一个高」:</p>
+  <p style="text-align:center">$\mathcal{L} = -\log \sigma\big(r(A) - r(B)\big)$</p>
+  <p>其中 $\sigma$ 是 sigmoid 函数。当 $r(A)$ 远高于 $r(B)$ 时损失趋近 0;当排反了损失很大。<strong>这就是绝大多数 RLHF 奖励模型的训练方式。</strong></p>
+
+  <div class="callout deep">
+    <span class="c-title">深水区:为什么这跟我们项目的 loss 不一样</span>
+    <p>上面是<strong>排序式(pairwise)</strong>训练,适合「人类偏好」这种没有客观对错、只有相对好坏的场景。而我们这个项目的 step 有一个 $[0,1]$ 的<strong>连续目标分数</strong>(某一步「将来能成功的概率」),所以用的是<strong>回归式</strong>的 masked MSE,而不是 Bradley-Terry。这个区别在 <a href="05-ml-toolkit.html">第 5 篇</a> 展开。先记住:奖励模型不止一种训法,训法取决于你的标签长什么样。</p>
+  </div>
+
+  <h2><span class="h-num">1.4</span>结果奖励 ORM:只看终点的问题</h2>
+  <p>上面描述的 RM 给「整个回答」打一个分。在推理任务(数学、代码)里,它通常变成一个更具体的东西:<span class="term">ORM</span>(Outcome Reward Model,结果奖励模型)——只判断<strong>最终答案对不对</strong>,给整条推理链一个分。</p>
+  <p>ORM 有个致命的结构性缺陷,叫 <span class="term">稀疏奖励 (sparse reward)</span> 和 <span class="term">信用分配 (credit assignment)</span> 问题:</p>
+
+  <div class="callout analogy">
+    <span class="c-title">类比:做错的数学题</span>
+    <p>一道 20 步的数学题,学生第 14 步算错了符号,导致最终答案错。ORM 只会说:「这条链,0 分。」</p>
+    <p>但前 13 步可能完全正确!ORM 没法告诉你<em>错在哪一步</em>。反过来,一个学生<em>蒙对</em>了答案但中间步骤全是瞎写,ORM 会给满分。<strong>「最终对错」这个信号太稀疏、太粗,没法定位过程里的好坏。</strong></p>
+  </div>
+
+  <p>这个缺陷直接催生了下一篇的主角:<strong>过程奖励模型(PRM)</strong>——不只看终点,而是给<em>每一步</em>都打分。这正是我们整个项目要做的事。</p>
+
+  <h2><span class="h-num">1.5</span>另一条路:RLVR——有些任务根本不用训 RM</h2>
+  <p>在继续之前,必须讲一个对「代码」这个领域极其重要的概念,否则第 3 篇那个核心论点会接不上。</p>
+  <p>前面说 RM 是「人类品味的自动替身」。但有些任务的好坏<strong>不需要人类品味,有客观标准</strong>:</p>
+  <ul>
+    <li><strong>数学</strong>:答案等于标准答案吗?(可以直接比对)</li>
+    <li><strong>代码</strong>:单元测试通过吗?(直接跑测试)</li>
+  </ul>
+  <p>这类任务,你可以跳过「训一个 RM」这一步,直接用一个<strong>规则 / 验证器</strong>当奖励:测试过了给 1,没过给 0。这就是 <span class="term">RLVR</span>(Reinforcement Learning with Verifiable Rewards,可验证奖励强化学习),被 DeepSeek-R1、Tülu 3 等近期工作大量使用。</p>
+
+  <div class="callout insight">
+    <span class="c-title">关键直觉:代码是「可验证奖励」的天然乐土</span>
+    <p>给散文打分需要品味(要训 RM);给代码打分只需要跑测试(规则即奖励)。这就是为什么数学和代码成了近两年 RL 推理研究的主战场——<strong>奖励信号又干净又免费</strong>。记住这一点,它是第 3 篇论证「为什么代码 Agent 适合做过程监督」的地基。</p>
+  </div>
+
+  <div class="callout interview">
+    <span class="c-title">面试视角</span>
+    <p>能清楚区分 <strong>ORM / PRM / RLVR</strong> 三者,是 Reward 方向的入门门槛。一句话版本:<em>ORM 给整条链一个学出来的分;PRM 给每一步一个分;RLVR 干脆不学,用可验证的规则当奖励。</em> 三者不是互斥的——比如你可以用 RLVR 的「测试结果」当 outcome,再用它去<strong>推导</strong>每一步的 PRM 标签(这正是我们项目干的事,见第 2 篇)。</p>
+  </div>
+
+  <h2><span class="h-num">1.6</span>本篇小结</h2>
+  <ul>
+    <li>预训练只教会模型「接话」,不教好坏;<strong>对齐</strong>补上品味。</li>
+    <li>经典对齐 = SFT → 训 RM → RL 三段式。<strong>奖励模型</strong>是 RL 阶段那个被调用千万次的「廉价人类替身」。</li>
+    <li>奖励模型常用<strong>两两偏好 + Bradley-Terry</strong> 训练(排序式);但标签是连续分数时改用回归式 loss。</li>
+    <li><strong>ORM</strong> 只看终点,带来稀疏奖励 / 信用分配难题 → 催生 PRM。</li>
+    <li><strong>RLVR</strong> 对数学/代码这类可验证任务,用规则当奖励,免训 RM。<strong>代码是可验证奖励的天然乐土。</strong></li>
+  </ul>
+
+  <nav class="pager">
+    <a href="index.html">
+      <div class="dir">← 上一篇</div>
+      <div class="ttl">总览</div>
+    </a>
+    <a class="next" href="02-process-reward.html">
+      <div class="dir">下一篇 →</div>
+      <div class="ttl">第 2 篇 · 过程奖励模型</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

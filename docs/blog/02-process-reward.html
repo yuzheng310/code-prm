@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 篇 · 过程奖励模型 (PRM)</title>
+<link rel="stylesheet" href="style.css">
+<script>MathJax = {tex: {inlineMath: [['$','$'],['\\(','\\)']]}};</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html" class="active"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">第 2 篇 · 核心范式</span>
+    <h1>过程奖励模型 (PRM)</h1>
+    <p class="lede">既然「只看终点」不够,那就给每一步打分。但马上撞上一个要命的问题:谁来标注「每一步的好坏」?人工标注贵到离谱。这一篇讲清 PRM 的来龙去脉,以及 Math-Shepherd 那个绝妙的「自动标注」思想——它正是我们项目 step_label 的理论原型。</p>
+  </header>
+
+  <h2><span class="h-num">2.1</span>过程监督 vs 结果监督</h2>
+  <p>把第 1 篇的对比拉满:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th></th><th>结果奖励 ORM</th><th>过程奖励 PRM</th></tr></thead>
+    <tbody>
+      <tr><td>打分对象</td><td>整条推理链</td><td>每一步</td></tr>
+      <tr><td>信号</td><td>1 个标量(最后对不对)</td><td>N 个标量(每步好不好)</td></tr>
+      <tr><td>能定位错误吗</td><td>不能</td><td>能(指出第几步开始崩)</td></tr>
+      <tr><td>「蒙对」问题</td><td>会被骗(过程错也给高分)</td><td>不易(过程烂会被逐步扣分)</td></tr>
+      <tr><td>标注成本</td><td>低(只需验证最终答案)</td><td>高(每步都要判断)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>2022–2023 年有两篇奠基工作把「过程监督更好」这件事钉死了:</p>
+  <ul>
+    <li><strong>Uesato et al. (2022, DeepMind)</strong>:在数学题上系统对比过程 vs 结果反馈,发现过程监督能显著减少「答案对但推理错」的情况。</li>
+    <li><strong>Lightman et al. (2023, OpenAI)《Let's Verify Step by Step》</strong>:在高难度 MATH 数据集上,过程监督训练的验证器明显优于结果监督。他们顺手放出了 <span class="term">PRM800K</span> —— 80 万个人工标注的步骤级标签数据集(每步标为 正确 / 中性 / 错误)。</li>
+  </ul>
+
+  <div class="callout def">
+    <span class="c-title">名词解释:PRM800K</span>
+    <p>OpenAI 公开的步骤级标注数据集,约 80 万条「数学解题步骤 + 人工标签」。它证明了过程监督的价值,但也暴露了瓶颈:<strong>这 80 万个标签是人一条条标出来的,极其昂贵。</strong> 这个项目的 <code>data/prm800k/</code> 就是它,被留着给 Phase 2 做「数学→代码」迁移 ablation(见第 6 篇)。</p>
+  </div>
+
+  <h2><span class="h-num">2.2</span>核心难题:谁来标「每一步的好坏」</h2>
+  <p>PRM 的效果好,但 PRM800K 的标注方式(雇人逐步标)无法规模化。整个领域 2024 年的核心问题就变成了:</p>
+  <blockquote>能不能<strong>不靠人</strong>,自动地给每一步生成一个质量标签?</blockquote>
+  <p>答案是能,而且想法非常漂亮。它来自 <strong>Math-Shepherd(Wang et al., 2024)</strong>。</p>
+
+  <h2><span class="h-num">2.3</span>Math-Shepherd:用「未来」给「现在」打分</h2>
+  <p>Math-Shepherd 的核心洞察是重新定义「一步的好坏」:</p>
+
+  <div class="callout insight">
+    <span class="c-title">关键定义:一步的价值 = 从这步出发,最终能做对的概率</span>
+    <p>不去问「这一步本身对不对」(那需要人判断),而是问:<strong>「站在这一步的状态上继续往下走,最后能得到正确答案的可能性有多大?」</strong> 如果从这一步出发大概率能成功,这步就是好步;如果从这步出发怎么走都死,这步就是坏步。</p>
+  </div>
+
+  <p>这个「最终能成功的概率」怎么估?用<span class="term">蒙特卡洛 rollout (Monte-Carlo rollout)</span>:</p>
+
+  <div class="figure">
+<pre>
+要给「第 i 步」打分:
+
+  1. 取轨迹的前缀:第 0 步 … 第 i 步      ← 把状态固定在这里
+  2. 从第 i 步往后,让模型随机续写 N 次   ← N 个不同的「未来」
+        续写₁ → 跑验证器 → 对 ✓
+        续写₂ → 跑验证器 → 错 ✗
+        续写₃ → 跑验证器 → 对 ✓
+        …
+        续写_N → 跑验证器 → 错 ✗
+  3. 第 i 步的分数 = 成功的续写数 / N
+        例如 N=8,其中 5 次成功 → step_label = 5/8 = 0.625
+</pre>
+    <div class="caption">蒙特卡洛 rollout 估计一步的价值。本质是「从这一步采样很多个未来,数一数有多少个未来成功」。</div>
+  </div>
+
+  <p>Math-Shepherd 给了两种把 rollout 变成标签的方式:</p>
+  <ul>
+    <li><span class="term">Hard Estimation (HE)</span>:只要有<em>任意一个</em>续写成功,这步就标 1,否则 0 → 得到 0/1 离散标签。</li>
+    <li><span class="term">Soft Estimation (SE)</span>:直接用成功比例(如 5/8 = 0.625)→ 得到 $[0,1]$ 连续<strong>软标签</strong>。</li>
+  </ul>
+
+  <div class="callout insight">
+    <span class="c-title">这就是你项目里 step_label 的语义</span>
+    <p>打开 <code>src/labeler/step_labeler.py</code>,函数 <code>llm_judge_score_step</code> 返回的是 <code>successes / K</code>——这正是 <strong>Soft Estimation</strong>!唯一的区别是:Math-Shepherd 用真实的模型续写 + 真实验证器来数成功率;而我们(为了省钱省工程量)用 <strong>一个 LLM 判官(judge)预测「这条前缀将来会不会成功」</strong> 来代替真实 rollout。这个替代的代价,是第 3 篇和第 6 篇的重点。</p>
+  </div>
+
+  <h2><span class="h-num">2.4</span>信用分配:把稀疏信号「摊」到每一步</h2>
+  <p>回头看 Math-Shepherd 干了什么:它<strong>只需要一个「最终对不对」的可验证信号(outcome)</strong>,就能反推出每一步的分数。它把终点那个稀疏的 0/1,通过「采样未来」摊回到了过程的每一步。这就解决了第 1 篇说的 <span class="term">信用分配 (credit assignment)</span> 问题。</p>
+
+  <div class="callout analogy">
+    <span class="c-title">类比:复盘一盘棋</span>
+    <p>你输了一盘棋(outcome=0)。怎么知道是哪一步走坏的?办法:从第 10 步的局面出发,让 AI 自己接着下 100 盘,如果 100 盘里你还能赢 60 盘,那第 10 步其实不坏(0.6);从第 25 步出发只能赢 5 盘,那第 25 步就是崩盘点(0.05)。<strong>每一步的分数 = 从那个局面出发的胜率。</strong> 这就是 rollout 式的信用分配。</p>
+  </div>
+
+  <h2><span class="h-num">2.5</span>为什么要软标签(而不是离散 +/-)</h2>
+  <p>这是一个真实的设计决策,在你的项目里被明确记录(STATUS 决策表第一行)。两种选择:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>方案</th><th>标签</th><th>loss</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td>离散化(如 OpenR)</td><td>把 5/8 强行归成「+」或「−」</td><td>分类交叉熵</td><td><strong>丢信息</strong>:5/8 和 8/8 都变成「+」,但它俩明明差很多</td></tr>
+      <tr><td>软标签(本项目)</td><td>保留 0.625 原值</td><td>masked MSE 回归</td><td>实现稍复杂,但<strong>无损保留</strong>了「有多大把握」的信息</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>项目选了软标签 + masked MSE,理由是「软标签无损,离散化会损失信号」。这是一个能在面试里讲的、有依据的选择。具体 loss 怎么写在 <a href="05-ml-toolkit.html">第 5 篇</a>。</p>
+
+  <div class="callout warn">
+    <span class="c-title">坑:失败轨迹怎么办?——项目的「outcome_zero 简化」</span>
+    <p>Math-Shepherd 对每条轨迹都要跑 rollout。但 rollout 很贵。本项目做了个简化:<strong>对最终失败(outcome=0)的轨迹,不跑 judge,直接把每个 tool step 都标成 0。</strong>(见 <code>label_trajectory_simplified</code>)</p>
+    <p>这省了大量 API 调用,但代价是:<em>一条最终失败的轨迹里,前面那些其实正确的步骤,也被冤枉地标成了 0。</em> 这是注入标签噪声。它是个<strong>已知有问题的简化</strong>,第 6 篇会专门拆解它的风险——这恰恰是面试官最爱戳的点。</p>
+  </div>
+
+  <h2><span class="h-num">2.6</span>本篇小结</h2>
+  <ul>
+    <li>PRM 给<strong>每一步</strong>打分;实验(Uesato 2022, Lightman 2023)证明过程监督优于结果监督。</li>
+    <li>瓶颈是<strong>标注成本</strong>:PRM800K 靠人工标 80 万步,无法规模化。</li>
+    <li><strong>Math-Shepherd</strong> 用「一步的价值 = 从该步出发最终成功的概率」+ 蒙特卡洛 rollout,实现<strong>自动标注</strong>,只需一个可验证的 outcome。</li>
+    <li>软标签(成功比例)比离散 +/− 信息更全 → 本项目选 soft label + masked MSE。</li>
+    <li>本项目把 rollout 换成 <strong>LLM-judge</strong>(省钱),并对失败轨迹做 <strong>outcome_zero 简化</strong>(更省钱)——两处简化都有代价,记住它们。</li>
+  </ul>
+
+  <nav class="pager">
+    <a href="01-foundations.html">
+      <div class="dir">← 上一篇</div>
+      <div class="ttl">第 1 篇 · 奖励模型基础</div>
+    </a>
+    <a class="next" href="03-code-agents.html">
+      <div class="dir">下一篇 →</div>
+      <div class="ttl">第 3 篇 · 搬到代码 Agent</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

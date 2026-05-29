@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 篇 · 这个项目的 Phase 1</title>
+<link rel="stylesheet" href="style.css">
+<script>MathJax = {tex: {inlineMath: [['$','$'],['\\(','\\)']]}};</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<div class="progress-bar"></div>
+<button class="menu-toggle" aria-label="菜单">☰</button>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="title">Code-PRM 技术博客</div>
+    <div class="subtitle">从零理解「给代码 Agent 训过程奖励模型」</div>
+  </div>
+  <nav>
+    <div class="nav-section">导读</div>
+    <a href="index.html"><span class="num">0</span><span>总览 · 你将学到什么</span></a>
+    <div class="nav-section">正文</div>
+    <a href="01-foundations.html"><span class="num">1</span><span>奖励模型基础:从 RLHF 说起</span></a>
+    <a href="02-process-reward.html"><span class="num">2</span><span>过程奖励模型 (PRM)</span></a>
+    <a href="03-code-agents.html"><span class="num">3</span><span>把 PRM 搬到代码 Agent</span></a>
+    <a href="04-this-project.html" class="active"><span class="num">4</span><span>这个项目的 Phase 1</span></a>
+    <a href="05-ml-toolkit.html"><span class="num">5</span><span>训练 PRM 的工具箱</span></a>
+    <a href="06-depth.html"><span class="num">6</span><span>深度、批判与求职</span></a>
+  </nav>
+</aside>
+
+<main>
+<article>
+  <header class="page-header">
+    <span class="eyebrow">第 4 篇 · 工程落地</span>
+    <h1>这个项目的 Phase 1</h1>
+    <p class="lede">前三篇是「领域」,这一篇是「你的代码」。把抽象概念逐一对应到仓库里真实的文件、字段和检查。读完你应该能对着任何一行代码说出「它在整条数据流里干嘛、对应哪个学术概念」。</p>
+  </header>
+
+  <h2><span class="h-num">4.1</span>Phase 1 的目标:造一份「带步骤标签」的数据集</h2>
+  <p>整个项目分三阶段:<strong>Phase 1 造数据 → Phase 2 训 PRM → Phase 3 评测(Best-of-N)</strong>。Phase 1 唯一的产出物是一份数据集:每条代码 Agent 轨迹,每一步都带一个 $[0,1]$ 的质量分。后面两阶段都靠它。</p>
+
+  <h2><span class="h-num">4.2</span>数据流全景</h2>
+  <div class="figure">
+<pre>
+HuggingFace 任务集 (BigCodeBench-Hard)
+   │
+   ▼  collect_batch.py（异步并发驱动)
+   │   给每个 rollout 设环境变量:LOG_DIR / TASK_JSON / ROLLOUT_ID …
+   │
+   ▼  子进程: node pi/dist/cli.js -p "<problem>"     ← TS 代码 Agent 真正干活
+   │     └─ pi 加载 extension: trajectory_logger.ts
+   │          ├─ 监听 agent 每一步,记录 thought / tool / tool_args / tool_result
+   │          ├─ agent_end 时跑 BigCodeBench grader → 得 outcome (0/1) + test_result
+   │          └─ 写一行 JSON 到 $LOG_DIR/<task_type>_<date>.jsonl
+   │
+   ▼  raw jsonl（含真实 outcome,但 grader 修好前不可信)
+   │
+   ▼  label_all.py → step_labeler.py
+   │     ├─ outcome=0 → 每个 tool step 标 0(simplification,不调 API)
+   │     └─ outcome=1 → 每个 tool step 调 K 次 judge(opus→V4-Pro)→ successes/K
+   │     └─ 盖章 label_method,原子写 labeled jsonl + manifest
+   │
+   ▼  30_assemble_dataset.py
+         ├─ 跑 6 个 hard check(见 §4.7)
+         └─ 切 train/val/test → data/code-trajectory-2.4k/
+</pre>
+    <div class="caption">Phase 1 数据流。TS 端负责「采集 + 判 outcome」,Python 端负责「打步骤标签 + 组装 + 质检」。</div>
+  </div>
+
+  <h2><span class="h-num">4.3</span>为什么用一个真实的 TS Agent(pi)</h2>
+  <p>很多人造 PRM 数据会直接用 API 让模型「一口气写出 CoT」。但本项目要的是<strong>真实的多轮 Agent 行为</strong>——会读文件、会跑测试、会根据报错改代码。所以它复用了一个开源 TS 编码 Agent <code>pi</code>(<code>yuzheng310/pi</code>,fork 自 earendil-works/pi),通过它的 <span class="term">extension hook</span> 机制把每一步录下来。</p>
+
+  <div class="callout def">
+    <span class="c-title">名词解释:extension / hook</span>
+    <p>pi 允许你挂一个扩展脚本,在 Agent 运行的关键时刻(每步结束、整个任务结束)被回调。<code>trajectory_logger.ts</code> 就是这样一个扩展:它<strong>不侵入</strong> Agent 的核心逻辑,只是「旁路」监听并记录。靠环境变量 <code>CODE_PRM_LOG_DIR</code> 激活,没设就完全惰性(inert)。</p>
+  </div>
+
+  <h2><span class="h-num">4.4</span>数据契约:三端共享的 schema</h2>
+  <p>TS 写、Python 读、训练器再读——三方必须对同一个数据结构达成一致。这份「契约」定义在 <code>src/labeler/trajectory_schema.py</code>(用 Pydantic),TS 端 <code>trajectory_logger.ts</code> 顶部镜像了同样的 interface。核心结构:</p>
+
+  <pre><code><span class="k">class</span> <span class="f">Step</span>:                  <span class="c"># 一步 = 一次工具调用 或 一个纯思考</span>
+    step:        <span class="f">int</span>          <span class="c"># 第几步(0 起)</span>
+    thought:     <span class="f">str</span>          <span class="c"># 工具调用前的想法</span>
+    tool:        <span class="f">str</span> | <span class="k">None</span>   <span class="c"># 工具名;None=纯思考步</span>
+    tool_args:   <span class="f">dict</span>         <span class="c"># 传给工具的参数</span>
+    tool_result: <span class="f">str</span>          <span class="c"># 工具返回(上游截断到 8000 字符)</span>
+    step_label:  <span class="f">float</span> | <span class="k">None</span> <span class="c"># [0,1] 质量分;labeler 填之前是 None</span>
+
+<span class="k">class</span> <span class="f">Trajectory</span>:
+    task_id, task_type, rollout_id
+    task_prompt:  <span class="f">str</span> | <span class="k">None</span>  <span class="c"># 题面!judge 没有它就不知道在解什么题</span>
+    trajectory:   <span class="f">list</span>[Step]
+    outcome:      <span class="f">int</span>         <span class="c"># 0=测试挂  1=测试过</span>
+    test_result:  TestResult | <span class="k">None</span> <span class="c"># 比 outcome 更细:exit_code/stderr…</span>
+    token_usage:  TokenUsage | <span class="k">None</span> <span class="c"># 真实 API 用量,用来算真实成本</span>
+    label_method: <span class="s">"llm_judge"</span> | <span class="s">"outcome_zero_simplification"</span>
+                | <span class="s">"mc_rollout"</span> | <span class="s">"ground_truth"</span> | <span class="k">None</span></code></pre>
+
+  <div class="callout insight">
+    <span class="c-title">设计亮点:label_method —— 诚实命名</span>
+    <p>每条轨迹都必须盖一个 <code>label_method</code> 章,说明这条数据的标签<strong>到底是怎么来的</strong>。这是项目里非常成熟的一个决策:它防止下游报告把「LLM-judge 估计」吹成「MC labels」。在 Reward 这种最讲究数据来源的方向,<strong>「我对标签来源做了显式可审计的标注」本身就是加分项。</strong> schema 里还有个校验器强制 <code>outcome</code> 必须和 <code>test_result.passed</code> 一致,防止两个字段对不上悄悄污染数据。</p>
+  </div>
+
+  <h2><span class="h-num">4.5</span>outcome 从哪来:BigCodeBench grader</h2>
+  <div class="callout def">
+    <span class="c-title">名词解释:BigCodeBench-Hard</span>
+    <p>一个代码生成基准(Zhuo et al., 2024)。任务给一段需求 + 函数签名,要你实现指定的 <code>entry_point</code> 函数,然后用官方单元测试判对错。Hard 子集更难。<strong>注意:v0.1.4 的 Hard 子集只有 148 个任务</strong>——这是个真实约束,直接影响数据规模(见第 6 篇)。</p>
+  </div>
+  <p>要得到第 2 篇所需的「可验证 outcome」,得真的跑测试。这是 grader 的活,也是目前项目<strong>已知最危险的一个坑</strong>:</p>
+
+  <div class="callout warn">
+    <span class="c-title">坑:test 字段不是能直接跑的脚本</span>
+    <p>BigCodeBench-Hard 的 <code>test</code> 字段通常<strong>只定义了一个 <code>unittest.TestCase</code> 类</strong>,既没有 <code>from task import ...</code>(把解法导进来),也没有 <code>unittest.main()</code>(触发运行)。如果 grader 直接把它写进文件 <code>python xxx.py</code>,结果是:<strong>0 个测试被执行,但进程 exit 0</strong> → 错误的解法被误判成 <code>outcome=1</code>(假阳性)。</p>
+    <p>修法:grader 生成临时文件时要 <em>prepend</em> <code>from task import &lt;entry_point&gt; as task_func</code>、<em>append</em> <code>if __name__=="__main__": unittest.main()</code>,这样才会真正执行断言。这是「全量采集前必须修」的头号任务。</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="c-title">坑:并发要 cwd 隔离</span>
+    <p>全量采集会开 <code>--concurrency 4</code> 多个 rollout 并行。如果它们共享同一个工作目录,A 写的 <code>task.py</code> 会被 B 覆盖,样本互相串台。每个 rollout 必须有独立的 cwd——agent 写的 <code>task.py</code>、grader 文件、<code>__pycache__</code> 都要落在各自目录里。</p>
+  </div>
+
+  <h2><span class="h-num">4.6</span>step_labeler:把第 2 篇变成代码</h2>
+  <p>这是 PRM 数据的灵魂。对照 <code>src/labeler/step_labeler.py</code>:</p>
+  <pre><code><span class="k">def</span> <span class="f">llm_judge_score_step</span>(traj, step_idx, client, K=<span class="n">4</span>):
+    prefix = traj.trajectory[: step_idx + <span class="n">1</span>]      <span class="c"># 取到第 i 步为止的前缀</span>
+    prompt = build_continuation_prompt(prefix, …)  <span class="c"># 题面 + 前缀轨迹</span>
+    successes = <span class="n">0</span>
+    <span class="k">for</span> _ <span class="k">in</span> <span class="f">range</span>(K):                          <span class="c"># 跑 K 次 judge</span>
+        text = client.complete(prompt, temperature=<span class="n">0.9</span>)
+        <span class="k">if</span> parses_as_PASS(text):               <span class="c"># judge 说会 PASS?</span>
+            successes += <span class="n">1</span>
+    <span class="k">return</span> successes / K                        <span class="c"># soft label ∈ {0/K,…,K/K}</span></code></pre>
+  <p>把它和第 2 篇对齐:</p>
+  <ul>
+    <li><code>prefix = trajectory[:i+1]</code> —— 第 2 篇说的「把状态固定在第 i 步」。</li>
+    <li>跑 K 次、数 PASS 比例 —— Math-Shepherd 的 <strong>Soft Estimation</strong>,只是用 judge 预测代替真实 rollout。</li>
+    <li><code>temperature=0.9</code> —— 让 K 次有随机性,否则 K 次结果一样、比例无意义。</li>
+    <li><code>parses_as_PASS</code> 用<strong>行锚定正则</strong>(<code>^\s*OUTCOME:\s*PASS</code>),避免把 "not OUTCOME: PASS" 这种叙述误判成 PASS——一个真实的解析鲁棒性细节。</li>
+  </ul>
+  <p>失败轨迹走 <code>label_trajectory_simplified</code>:直接把每个 tool step 标 0(第 2 篇的 outcome_zero 简化)。整个 <code>label_file</code> 用 <strong>原子写</strong>(写 <code>.tmp</code> 再 rename),任何中途异常都不会留下半截污染文件。</p>
+
+  <h2><span class="h-num">4.7</span>组装时的 6 个 hard check(质量闸门)</h2>
+  <p><code>scripts/30_assemble_dataset.py</code> 在切分数据集前会跑 6 个硬检查,任一不过就 <code>SystemExit(2)</code>。这是 Phase 1 的「出厂质检」,每个 check 防一类具体 bug:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>检查</th><th>它防什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>label_method</code> 每条都设了</td><td>防止有轨迹漏盖标签来源章 → 下游分不清这条怎么标的</td></tr>
+      <tr><td>outcome=1 的 <code>task_prompt</code> 覆盖率 ≥ 95%</td><td>judge 没题面就不知道在解什么题 → 标签全废</td></tr>
+      <tr><td>outcome=1 的 tool step 标签覆盖率 ≥ 80%</td><td>防止大量步骤没被打分(API 中断/解析失败)</td></tr>
+      <tr><td>outcome_zero 轨迹的每个 tool step 都 = 0</td><td>防止「盖了 simplification 章但实际没赋值」的半成品</td></tr>
+      <tr><td><code>token_usage</code> 覆盖率 ≥ 80%</td><td>保证成本统计基于真实用量而非估算</td></tr>
+      <tr><td>judge 标签均值落在 [0.2, 0.8]</td><td>防止标签<strong>退化</strong>(全 0 或全 1 = judge 没在干活,数据没信息量)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout interview">
+    <span class="c-title">面试视角:这 6 个 check 是「数据质量意识」的证据</span>
+    <p>对 Reward 方向,「你怎么保证训练数据没烂」是核心问题。你可以直接讲:「我在数据组装前设了 6 个 fail-fast 的质量闸门,特别是<strong>标签分布非退化检查</strong>——如果 judge 退化成全标 1,这批数据等于没信息,我宁可让流水线崩掉也不让脏数据进训练集。」这比「我写了个采集脚本」高了一个量级。</p>
+  </div>
+
+  <h2><span class="h-num">4.8</span>本篇小结</h2>
+  <ul>
+    <li>Phase 1 产出一份「每步带 $[0,1]$ 标签」的代码 Agent 轨迹数据集。</li>
+    <li>用真实 TS Agent(pi)+ 旁路 extension 采集真实多轮行为;<code>trajectory_schema.py</code> 是三端共享契约。</li>
+    <li><code>label_method</code> 诚实命名 + <code>outcome↔test_result</code> 一致性校验 = 数据可审计性。</li>
+    <li>outcome 靠 BigCodeBench grader 跑测试得到;<strong>grader harness 假阳性</strong> 和 <strong>cwd 隔离</strong> 是两个必修的坑。</li>
+    <li><code>step_labeler.py</code> 是第 2 篇 Soft Estimation 的代码化(K 次 judge / successes 比例)。</li>
+    <li>组装前 6 个 hard check 当质量闸门,尤其「分布非退化」检查体现数据质量意识。</li>
+  </ul>
+
+  <nav class="pager">
+    <a href="03-code-agents.html">
+      <div class="dir">← 上一篇</div>
+      <div class="ttl">第 3 篇 · 搬到代码 Agent</div>
+    </a>
+    <a class="next" href="05-ml-toolkit.html">
+      <div class="dir">下一篇 →</div>
+      <div class="ttl">第 5 篇 · 训练 PRM 的工具箱</div>
+    </a>
+  </nav>
+</article>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

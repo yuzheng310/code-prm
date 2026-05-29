@@ -1,6 +1,6 @@
 # Code-PRM 当前工作状况
 
-最近更新:commit `445a94f`(加入 BigCodeBench 真实 grader,移除预算硬上限)
+最近更新:审查发现当前 BigCodeBench grader **不能直接信任**:dataset `test` 字段未被真正执行,且 collection 缺少 per-rollout cwd 隔离;全量采集前必须修复
 
 ---
 
@@ -25,7 +25,7 @@ Phase 1 plan:`docs/superpowers/plans/2026-05-27-code-prm-phase1-foundation.md`
 | LLM 后端 | DeepSeek Anthropic 兼容端点 | API key 限制,直连 Anthropic 403。`claude-*` 模型名自动映射到 `deepseek-v4-flash/pro` |
 | Collection 模型 | `claude-sonnet-4-5` → `deepseek-v4-flash` | 便宜的策略模型 |
 | **Judge 模型** | **`claude-opus-4-7` → `deepseek-v4-pro`** | **避免 self-evaluation 偏差**(judge 比 policy 强,Math-Shepherd 经典设置) |
-| **Outcome 来源** | **trajectory_logger.ts 内置 BigCodeBench grader**(`agent_end` 时跑 `python <task.test>` 60s timeout) | 早期 outcome 默认 0 导致 100% 走 `outcome_zero_simplification` 路径,LLM-judge 从未被真实数据触发。grader 给出真实 pass/fail,outcome=1 才走 judge → step_label 才有意义 |
+| **Outcome 来源** | **目标:trajectory_logger.ts 内置 BigCodeBench grader**(`agent_end` 时跑官方 test)；**当前实现需修复后才能使用** | 早期 outcome 默认 0 导致 100% 走 `outcome_zero_simplification`。但当前直接 `python <task.test>` 不会执行 BigCodeBench 的 unittest assertion,存在假阳性风险；必须生成可执行 harness 后再采集 |
 | 数据语义 | **诚实命名**:`label_method` 区分 `llm_judge` / `outcome_zero_simplification` / 未来 `mc_rollout` / `ground_truth` | 防止下游报告写"MC labels"被戳穿 |
 | 预算控制 | **代码层不强制预算**(`--budget_usd 1000000` ≈ 无限);成本看 relay dashboard / `cost_aggregator` 后置统计 | Opus 节奏下 hard cap 会原子写回滚已完成工作;改成"花了再说"的策略 |
 
@@ -40,7 +40,7 @@ Phase 1 plan:`docs/superpowers/plans/2026-05-27-code-prm-phase1-foundation.md`
                               └─ pi 加载 ~/.pi/agent/extensions/trajectory_logger.ts
                                   └─ 写 $LOG_DIR/<task_type>_<date>.jsonl  ← raw trajectory
                                       
-raw jsonl(已含真实 outcome,grader 跑过 BigCodeBench test)
+raw jsonl(目标:含真实 outcome；当前 grader 修复前不要信任 outcome 分布)
               ─→ Python label_all.py
                   ├─ 每条 trajectory:
                   │   ├─ outcome=0 → step_label=0.0 (no API,simplification)
@@ -62,58 +62,77 @@ labeled jsonl ─→ scripts/30_assemble_dataset.py
 | 阶段 | 状态 |
 |---|---|
 | 代码骨架(Phase 1) | ✅ 18 Python files, 6 shell scripts, 1 TS extension |
-| 单元测试 | ✅ ~110 tests,语法/逻辑全过 |
+| 单元测试 | ⚠️ 曾有 ~110 tests 通过；当前审查后 targeted tests 暴露过期断言(`test_uses_pi_cli_for_bigcodebench`)且缺少 grader/cwd 关键覆盖 |
 | Lab box 环境 | ✅ AutoDL vGPU-48GB, Node 20, pi 已 build, conda env 完整 |
-| pi extension(trajectory_logger.ts) | ✅ 字段全部对齐 pi 真实 API,**含 BigCodeBench grader** |
-| Trajectory collection 流水线 | ✅ 10 任务 pilot 跑通,token_usage / tool_result / thought 全部捕获 |
-| 真实 outcome 标签 | ⚠️ grader 代码完成,**真实分布尚未验证(下一步:重跑 pilot 看 outcome 分布)** |
-| LLM-judge labeler 流水线 | ⚠️ 代码完成,verification 等真实 outcome 数据(force-pass 测试已被废弃,逻辑见 commit `445a94f`) |
-| 全量数据采集 | ❌ 未开始(~$80,~8h) |
-| 全量 labeling | ❌ 未开始(~$60,~12h) |
+| pi extension(trajectory_logger.ts) | ⚠️ 字段对齐 pi 真实 API,但 **BigCodeBench grader 当前有致命假阳性风险** |
+| Trajectory collection 流水线 | ⚠️ 10 任务 pilot 曾跑通 token_usage / tool_result / thought 捕获,但 outcome 不可信,且缺少 per-rollout cwd 隔离 |
+| 真实 outcome 标签 | ❌ **阻塞:grader harness 未正确执行 BigCodeBench unittest;全量采集前必须修** |
+| LLM-judge labeler 流水线 | ⚠️ 代码方向正确(prefix success probability),但 parser/输入截断/目录拓扑 guard 需加固；verification 等可信 outcome 数据 |
+| 全量数据采集 | ❌ 未开始(成本/时长 TBD；取决于修复后 rollout 数,BigCodeBench-Hard v0.1.4 只有 148 tasks) |
+| 全量 labeling | ❌ 未开始(成本/时长 TBD；等可信 outcome + 最终数据规模确定) |
 | Dataset assembly + Phase 1 报告 | ❌ 未开始 |
 
 ---
 
-## 立即下一步:重跑 pilot,看真实 outcome 分布
+## 立即下一步:先修 grader,再重跑 pilot
+
+**不要直接跑全量采集。当前 outcome 分布不可信。**
+
+审查发现 BigCodeBench-Hard 的 `test` 字段通常只定义 `unittest.TestCase`,不包含:
+- `from task import ...`
+- `unittest.main()`
+
+因此当前 `trajectory_logger.ts` 直接写 `test` 到文件并执行 `python <file>` 会出现"0 个测试被执行但进程 exit 0"的假阳性,把错误解误标成 `outcome=1`。
+
+修复顺序:
+
+1. **修 `src/collector/trajectory_logger.ts` 的 BigCodeBench harness**
+   - 生成临时 grader 文件时 prepend:
+     - `from task import <entry_point> as task_func`
+   - append:
+     - `if __name__ == "__main__": unittest.main()`
+   - 验证错误 `task.py` 会 fail,正确 `task.py` 会 pass。
+
+2. **修 `src/eval/swebench_runner.py` 的运行目录隔离**
+   - 每个 task/rollout 使用独立 cwd/workdir。
+   - agent 写 `task.py`、grader 文件、`__pycache__`、任务临时文件都必须落在该 cwd。
+   - 全量脚本 `--concurrency 4` 下不能共享同一个 `task.py`。
+
+3. **修 BigCodeBench prompt**
+   - prompt 必须包含 `code_prompt` / `entry_point`,不只给自然语言 `instruct_prompt`。
+   - 明确要求在 `task.py` 中实现指定 entry point。
+
+4. **修 tests**
+   - 增加 harness 单测:空/错误 solution fail,正确 solution pass。
+   - 增加 runner 单测:BigCodeBench subprocess 使用独立 cwd。
+   - 更新 `test_uses_pi_cli_for_bigcodebench` 当前过期断言。
+
+修完后再跑:
 
 ```bash
-cd ~/code-prm
-git pull origin main
-
-# pilot 现在会真跑 BigCodeBench 测试 → 真实 outcome
 bash scripts/05_collect_pilot.sh
-
-# 看 outcome 分布
-python -c "
-import json
-from collections import Counter
-import glob
-outcomes = Counter()
-for f in glob.glob('data/raw/pilot/*.jsonl'):
-    if '.ipynb_checkpoints' in f: continue
-    for line in open(f):
-        t = json.loads(line)
-        outcomes[t['outcome']] += 1
-print('outcome distribution:', dict(outcomes))
-"
 ```
 
-**成功标准**:`outcome distribution: {0: ~6, 1: ~4}`(或类似的 30-60% pass 率)。
+成功标准:
+- 每条 BigCodeBench trajectory 都有 `test_result`。
+- `outcome == int(test_result.passed)`。
+- outcome 分布非退化(目标约 30-60% pass；真实值可浮动)。
+- 失败 stderr 主要是 assertion/import/解法错误,不是 grader harness 没跑、`timeout` 不存在、cwd 污染。
 
-完全没有 outcome=1 → 说明 grader 没工作 / agent 写错路径 / 任务太难。贴 raw 数据 stderr_tail 排查。
+outcome 分布可信后再跑:
 
-**outcome 分布正常后**:
 ```bash
 bash scripts/06_label_pilot.sh
-# 这次会真正调 Opus judge,在 outcome=1 trajectories 上产生有意义的 step_label
 ```
 
 ---
 
-## 全部跑通后的剩余命令(顺序)
+## grader 修复并通过 pilot 后的剩余命令(顺序)
+
+**前置条件**:上一节 4 项修复完成,且 pilot outcome/test_result 已验证可信。否则不要执行本节全量命令。
 
 ```bash
-# ── 全量采集(~6-8h, ~$80) ────────────────
+# ── 全量采集(成本/时长取决于最终 rollout 数；v0.1.4 hard 只有 148 tasks) ────────────────
 tmux new -s collect
 bash scripts/11_collect_bigcodebench.sh
 # Ctrl-B d 脱离,期间可关 ssh
@@ -260,7 +279,7 @@ nvidia-smi | head           # 看到 48GB GPU
 ls ~/pi/packages/coding-agent/dist/cli.js   # pi 已 build
 ls ~/.pi/agent/extensions/trajectory_logger.ts  # extension 已软链
 echo "$ANTHROPIC_BASE_URL"  # 应该有值
-cd ~/code-prm && pytest tests/ -q   # 110+ tests 全过
+cd ~/code-prm && pytest tests/ -q   # 修复 grader/cwd/tests 后应全过；当前 targeted tests 已暴露过期断言
 ```
 
 ---
@@ -275,7 +294,7 @@ cd ~/code-prm && pytest tests/ -q   # 110+ tests 全过
 | `src/eval/swebench_runner.py` | TS 子进程启动器 |
 | `src/eval/collect_batch.py` | 异步并发采集驱动 |
 | `src/utils/cost_aggregator.py` | 从 trajectory.token_usage 算真实成本 |
-| `scripts/05_collect_pilot.sh` | 10-task pilot(**现在含 BigCodeBench grader**) |
+| `scripts/05_collect_pilot.sh` | 10-task pilot(修复 grader harness/cwd 隔离后用于验证真实 outcome) |
 | `scripts/06_label_pilot.sh` | labeling pilot |
 | `scripts/07_label_pilot_judge.sh` | force-pass pilot(已废弃 — grader 上线后 force-pass 测试无意义,代码留作参考) |
 | `scripts/11_collect_bigcodebench.sh` | 全量采集 |
@@ -295,22 +314,24 @@ cd ~/code-prm && pytest tests/ -q   # 110+ tests 全过
 5. **pi 字段名跟 Anthropic 不同**:`usage.input` 不是 `usage.input_tokens`(extension 已对齐)
 6. **node ≥ 20 + 系统 lib**:setup_pi.sh 有检测
 7. **`thought` 来自 `ThinkingContent`**:extended thinking 模式下推理在这,extension 已读
+8. **BigCodeBench-Hard `test` 不是可直接执行脚本**:它通常只定义 `unittest.TestCase`,没有 import solution / `unittest.main()`；grader 必须生成 harness。
+9. **BigCodeBench rollout 必须 cwd 隔离**:全量 `--concurrency 4` 时共享 `task.py` 会串样本。
+10. **GNU `timeout` 非 macOS 默认工具**:lab box Ubuntu 可用,但本地 Darwin 会失败；长期应改成跨平台 timeout。
+11. **BigCodeBench-Hard v0.1.4 只有 148 tasks**:如果仍要约 1200 trajectories,需要 8 rollouts 或补充任务源；`300 tasks x 4` 的旧叙事不成立。
 
 ---
 
 ## 总体预算
 
 - 已花:~$1(pilots)
-- 待花:~$140(全量采集 + labeling)
+- 待花:TBD(旧估算 ~$140 基于 1200 trajectory；若 BigCodeBench-Hard v0.1.4 走 148×8 才接近 1200)
 - Phase 1 上限:$500(spec §6.3)
-- 剩余 buffer 充裕
+- 剩余 buffer 仍然充裕,但先修 grader 再花钱
 
 ---
 
 ## 下一步只看这三条
 
-1. **`bash scripts/05_collect_pilot.sh`** — 看 outcome 分布是不是 30-60% pass(不再全 0)
-2. **`bash scripts/06_label_pilot.sh`** — 真实 outcome 触发 judge,看 step_label 分布健康
-3. **OK 后 `bash scripts/11_collect_bigcodebench.sh`(tmux 后台)** — 全量 1200 trajectory
-
-之后顺着 "全部跑通后的剩余命令" 章节走。
+1. **先修 grader harness + per-rollout cwd + BigCodeBench prompt/tests** — 不修不要看 outcome 分布。
+2. **`bash scripts/05_collect_pilot.sh`** — 验证 `test_result` 可信、outcome 非退化、无 cwd/timeout/harness 假信号。
+3. **pilot 可信后 `bash scripts/06_label_pilot.sh`** — 看 judge step_label 分布；再决定是否全量采集。
