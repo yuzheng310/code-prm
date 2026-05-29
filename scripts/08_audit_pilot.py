@@ -88,6 +88,7 @@ def audit_dir(
     input_dir: Path,
     *,
     expected_count: int = 10,
+    expected_rollouts_per_task: int = 1,
     max_tail_chars: int = 800,
 ) -> AuditResult:
     files = sorted(input_dir.glob("*.jsonl"))
@@ -170,7 +171,7 @@ def audit_dir(
             errors.append(f"row {idx} task={task_id}: missing task_prompt")
         if not traj.run_id:
             errors.append(f"row {idx} task={task_id}: missing run_id")
-        if traj.rollout_id != 0:
+        if expected_rollouts_per_task == 1 and traj.rollout_id != 0:
             warnings.append(f"row {idx} task={task_id}: rollout_id={traj.rollout_id}, expected pilot rollout_id=0")
         if traj.token_usage is None:
             errors.append(f"row {idx} task={task_id}: missing token_usage")
@@ -184,15 +185,35 @@ def audit_dir(
     if len(records) != expected_count:
         errors.append(f"Expected {expected_count} trajectories, found {len(records)}")
 
-    task_counts = Counter(task_ids)
-    duplicate_task_ids = sorted(task_id for task_id, count in task_counts.items() if count > 1)
-    if duplicate_task_ids:
-        errors.append(f"Duplicate task_id values in one-rollout pilot: {duplicate_task_ids}")
+    task_to_rollouts: dict[str, set[int]] = {}
+    for task_id, rollout_id in zip(task_ids, rollout_ids):
+        if isinstance(rollout_id, int):
+            task_to_rollouts.setdefault(task_id, set()).add(rollout_id)
+    expected_rollout_ids = list(range(expected_rollouts_per_task))
+    rollouts_per_task = {
+        task_id: sorted(ids)
+        for task_id, ids in sorted(task_to_rollouts.items())
+    }
+    for task_id, ids in rollouts_per_task.items():
+        if ids != expected_rollout_ids:
+            errors.append(
+                f"task_id {task_id}: expected rollout ids {expected_rollout_ids}, got {ids}"
+            )
 
+    task_counts = Counter(task_ids)
+    bad_task_counts = sorted(
+        (task_id, count) for task_id, count in task_counts.items()
+        if count != expected_rollouts_per_task
+    )
+    if bad_task_counts:
+        errors.append(
+            f"Task trajectory counts do not match expected_rollouts_per_task="
+            f"{expected_rollouts_per_task}: {bad_task_counts[:20]}"
+        )
     nonempty_run_ids = [run_id for run_id in run_ids if run_id]
     duplicate_run_ids = sorted(run_id for run_id, count in Counter(nonempty_run_ids).items() if count > 1)
     if duplicate_run_ids:
-        errors.append(f"Duplicate run_id values: {duplicate_run_ids}")
+        errors.append(f"Duplicate run_id values: {duplicate_run_ids[:20]}")
 
     outcome_counts = Counter(outcome_values)
     if len(records) > 1 and len(outcome_counts) == 1:
@@ -214,6 +235,8 @@ def audit_dir(
         "token_usage_present": sum(raw.get("token_usage") is not None for _, _, raw in records),
         "run_ids_unique": len(set(nonempty_run_ids)),
         "rollout_ids": dict(sorted(Counter(rollout_ids).items(), key=lambda item: str(item[0]))),
+        "unique_task_ids": len(task_counts),
+        "rollouts_per_task": rollouts_per_task,
         "policy_models": dict(policy_models),
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
@@ -223,8 +246,7 @@ def audit_dir(
     }
     return AuditResult(input_dir=input_dir, files=files, summary=summary, rows=rows, errors=errors, warnings=warnings)
 
-
-def render_report(result: AuditResult) -> str:
+def render_report(result: AuditResult, *, max_rows: int | None = None) -> str:
     lines: list[str] = []
     lines.append(f"Pilot audit for {result.input_dir}")
     lines.append(f"status: {'PASS' if result.ok else 'FAIL'}")
@@ -246,7 +268,8 @@ def render_report(result: AuditResult) -> str:
 
     lines.append("")
     lines.append("Rows:")
-    for row in result.rows:
+    rows_to_show = result.rows if max_rows is None else result.rows[:max_rows]
+    for row in rows_to_show:
         lines.append(
             f"  [{row.index}] {row.task_id} file={row.file} "
             f"outcome={row.outcome} passed={row.passed} exit={row.exit_code} "
@@ -258,18 +281,34 @@ def render_report(result: AuditResult) -> str:
         if row.stdout_tail:
             lines.append("    stdout_tail:")
             lines.extend(f"      {line}" for line in row.stdout_tail.splitlines()[-8:])
+    omitted = len(result.rows) - len(rows_to_show)
+    if omitted > 0:
+        lines.append(f"  ... {omitted} more row(s) omitted; rerun with --max-rows 0 to print all")
     return "\n".join(lines)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dir", type=Path, default=Path("data/raw/pilot"), help="Pilot raw jsonl directory")
-    parser.add_argument("--expected-count", type=int, default=10, help="Expected pilot trajectory count")
+    parser.add_argument("--dir", type=Path, default=Path("data/raw/pilot"), help="Raw jsonl directory")
+    parser.add_argument("--expected-count", type=int, default=10, help="Expected trajectory count")
+    parser.add_argument(
+        "--expected-rollouts-per-task",
+        type=int,
+        default=1,
+        help="Expected rollout ids per task: 1 for pilot, 4 for full collection",
+    )
     parser.add_argument("--max-tail-chars", type=int, default=800, help="Per-row stdout/stderr tail chars")
+    parser.add_argument("--max-rows", type=int, default=30, help="Maximum rows to print; 0 prints all rows")
     args = parser.parse_args()
 
-    result = audit_dir(args.dir, expected_count=args.expected_count, max_tail_chars=args.max_tail_chars)
-    print(render_report(result))
+    result = audit_dir(
+        args.dir,
+        expected_count=args.expected_count,
+        expected_rollouts_per_task=args.expected_rollouts_per_task,
+        max_tail_chars=args.max_tail_chars,
+    )
+    max_rows = None if args.max_rows == 0 else args.max_rows
+    print(render_report(result, max_rows=max_rows))
     raise SystemExit(0 if result.ok else 2)
 
 
