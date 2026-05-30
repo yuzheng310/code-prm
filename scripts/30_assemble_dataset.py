@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Combine all labeled trajectories into train/val/test split.
+"""Combine labeled trajectories into leakage-safe train/val/test splits.
 
-Reads from `data/labeled/{swebench-lite,bigcodebench-hard}/*.jsonl`,
-deterministically shuffles, and writes to `data/code-trajectory-2.4k/`.
-
-Before writing the final dataset, runs HARD CHECKS against Phase 1 exit
-criteria. By default these fail fast — use `--skip_checks` to bypass
-(useful for debugging or for the pilot stage where coverage is low).
+Reads labeled trajectory jsonl files, validates Phase 1 exit criteria, then
+splits at the task level: all rollouts for one task stay in the same split.
+This is required for held-out evaluation and Best-of-N, because different
+rollouts of the same task share the same prompt, tests, and failure modes.
 
 Run from project root:
     python scripts/30_assemble_dataset.py
@@ -16,8 +14,9 @@ import argparse
 import json
 import random
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Allow running as a script from project root
@@ -102,7 +101,8 @@ def inspect_manifests(
         missing_outputs: list[str] = []
         for entry in data.get("processed_files", []):
             out_path = Path(entry["output"])
-            if not out_path.exists():
+            relocated_path = d / out_path.name
+            if not out_path.exists() and not relocated_path.exists():
                 missing_outputs.append(str(out_path))
         results.append(CheckResult(
             name=f"manifest outputs exist in {d.name}",
@@ -143,7 +143,11 @@ def split(
     test_frac: float,
     seed: int,
 ) -> tuple[list[Trajectory], list[Trajectory], list[Trajectory]]:
-    """Deterministic shuffle + slice into (train, val, test)."""
+    """Legacy trajectory-level split.
+
+    Kept only for tests/debugging. Final Phase 1 data must use split_by_task()
+    so that rollouts from one task never leak across train/val/test.
+    """
     rng = random.Random(seed)
     shuffled = list(trajectories)
     rng.shuffle(shuffled)
@@ -154,6 +158,120 @@ def split(
     val = shuffled[n_test : n_test + n_val]
     train = shuffled[n_test + n_val :]
     return train, val, test
+
+
+def _task_key(t: Trajectory) -> tuple[str, int]:
+    return (t.task_id, t.rollout_id)
+
+
+def _group_by_task(trajectories: list[Trajectory]) -> dict[str, list[Trajectory]]:
+    groups: dict[str, list[Trajectory]] = defaultdict(list)
+    for t in trajectories:
+        groups[t.task_id].append(t)
+    return dict(groups)
+
+
+def _pass_count(group: list[Trajectory]) -> int:
+    return sum(t.outcome for t in group)
+
+
+def _flatten_groups(groups: list[list[Trajectory]]) -> list[Trajectory]:
+    flattened: list[Trajectory] = []
+    for group in groups:
+        flattened.extend(sorted(group, key=lambda t: t.rollout_id))
+    return flattened
+
+
+def _split_groups_by_fracs(
+    groups: list[list[Trajectory]],
+    fracs: tuple[float, float, float],
+) -> tuple[list[list[Trajectory]], list[list[Trajectory]], list[list[Trajectory]]]:
+    n = len(groups)
+    n_train = int(n * fracs[0])
+    n_val = int(n * fracs[1])
+    train = groups[:n_train]
+    val = groups[n_train : n_train + n_val]
+    test = groups[n_train + n_val :]
+    return train, val, test
+
+
+def _take_mixed_groups(
+    by_pass_count: dict[int, list[list[Trajectory]]],
+    mixed_alloc: tuple[int, int, int],
+) -> tuple[list[list[Trajectory]], list[list[Trajectory]], list[list[Trajectory]]]:
+    """Allocate mixed tasks while preserving 1/4, 2/4, 3/4 buckets.
+
+    We fill train, then val, then test. Within each split, each next task is
+    taken from the pass-count bucket with the largest remaining fraction. This
+    keeps small held-out splits from being filled only by one mixed difficulty
+    bucket while still honoring exact total mixed task counts.
+    """
+    total_mixed = sum(len(by_pass_count.get(pc, [])) for pc in (1, 2, 3))
+    expected = sum(mixed_alloc)
+    if total_mixed != expected:
+        raise ValueError(
+            f"mixed_alloc sums to {expected}, but dataset has {total_mixed} "
+            "mixed-outcome tasks"
+        )
+
+    originals = {pc: len(by_pass_count.get(pc, [])) for pc in (1, 2, 3)}
+    remaining = {pc: list(by_pass_count.get(pc, [])) for pc in (1, 2, 3)}
+    splits: tuple[list[list[Trajectory]], list[list[Trajectory]], list[list[Trajectory]]] = (
+        [],
+        [],
+        [],
+    )
+    for split_idx, target in enumerate(mixed_alloc):
+        for _ in range(target):
+            candidates = [pc for pc in (1, 2, 3) if remaining[pc]]
+            if not candidates:
+                raise ValueError("mixed allocation underfilled; this is a split bug")
+            pc = max(
+                candidates,
+                key=lambda p: (len(remaining[p]) / originals[p], len(remaining[p])),
+            )
+            splits[split_idx].append(remaining[pc].pop())
+    return splits
+
+
+def split_by_task(
+    trajectories: list[Trajectory],
+    *,
+    mixed_alloc: tuple[int, int, int] = (18, 4, 6),
+    nonmixed_fracs: tuple[float, float, float] = (0.8, 0.1, 0.1),
+    seed: int = 42,
+) -> tuple[list[Trajectory], list[Trajectory], list[Trajectory]]:
+    """Split by task_id, keeping every task's rollouts together.
+
+    mixed_alloc is (train, val, test) task counts for mixed-outcome tasks.
+    Non-mixed tasks are stratified by pass-count buckets, so all-fail and
+    all-pass tasks retain approximately similar proportions in every split.
+    """
+    rng = random.Random(seed)
+    groups = _group_by_task(trajectories)
+
+    by_pass_count: dict[int, list[list[Trajectory]]] = defaultdict(list)
+    for group in groups.values():
+        by_pass_count[_pass_count(group)].append(group)
+
+    for bucket in by_pass_count.values():
+        bucket.sort(key=lambda group: group[0].task_id)
+        rng.shuffle(bucket)
+
+    train_groups, val_groups, test_groups = _take_mixed_groups(by_pass_count, mixed_alloc)
+
+    for pc, groups_in_bucket in sorted(by_pass_count.items()):
+        if 0 < pc < len(groups_in_bucket[0]):
+            continue
+        train_b, val_b, test_b = _split_groups_by_fracs(groups_in_bucket, nonmixed_fracs)
+        train_groups.extend(train_b)
+        val_groups.extend(val_b)
+        test_groups.extend(test_b)
+
+    for bucket in (train_groups, val_groups, test_groups):
+        bucket.sort(key=lambda group: group[0].task_id)
+
+    return _flatten_groups(train_groups), _flatten_groups(val_groups), _flatten_groups(test_groups)
 
 
 def report(split_name: str, data: list[Trajectory]) -> None:
@@ -181,9 +299,190 @@ def check_label_method_set(trajectories: list[Trajectory]) -> CheckResult:
             "all trajectories tagged"
             if not missing
             else f"{len(missing)} trajectories missing label_method "
-                 f"(first: {missing[:3]})"
+            f"(first: {missing[:3]})"
         ),
     )
+
+
+def _task_ids(data: list[Trajectory]) -> set[str]:
+    return {t.task_id for t in data}
+
+
+def _mixed_task_ids(data: list[Trajectory]) -> list[str]:
+    mixed: list[str] = []
+    for task_id, group in _group_by_task(data).items():
+        outcomes = {t.outcome for t in group}
+        if outcomes == {0, 1}:
+            mixed.append(task_id)
+    return sorted(mixed)
+
+
+def _pass_count_histogram(data: list[Trajectory]) -> dict[str, int]:
+    hist: Counter[str] = Counter()
+    for group in _group_by_task(data).values():
+        hist[f"{_pass_count(group)}/{len(group)}"] += 1
+    return dict(sorted(hist.items()))
+
+
+def check_no_task_overlap(
+    train: list[Trajectory],
+    val: list[Trajectory],
+    test: list[Trajectory],
+) -> CheckResult:
+    train_ids = _task_ids(train)
+    val_ids = _task_ids(val)
+    test_ids = _task_ids(test)
+    overlaps = {
+        "train_val": sorted(train_ids & val_ids),
+        "train_test": sorted(train_ids & test_ids),
+        "val_test": sorted(val_ids & test_ids),
+    }
+    bad = {k: v[:5] for k, v in overlaps.items() if v}
+    return CheckResult(
+        name="task ids do not overlap across splits",
+        passed=not bad,
+        detail="all disjoint" if not bad else f"overlaps found: {bad}",
+    )
+
+
+def check_rollout_completeness(
+    trajectories: list[Trajectory],
+    rollouts_per_task: int = 4,
+) -> CheckResult:
+    expected = set(range(rollouts_per_task))
+    bad: list[str] = []
+    duplicate: list[str] = []
+    for task_id, group in _group_by_task(trajectories).items():
+        rollout_ids = [t.rollout_id for t in group]
+        if len(rollout_ids) != len(set(rollout_ids)):
+            duplicate.append(task_id)
+            continue
+        if set(rollout_ids) != expected:
+            bad.append(f"{task_id}:{sorted(rollout_ids)}")
+    ok = not bad and not duplicate
+    return CheckResult(
+        name=f"every task has rollout ids {sorted(expected)}",
+        passed=ok,
+        detail=(
+            "all complete"
+            if ok
+            else f"missing/bad={bad[:5]}, duplicate={duplicate[:5]}"
+        ),
+    )
+
+
+def check_conservation(
+    original: list[Trajectory],
+    train: list[Trajectory],
+    val: list[Trajectory],
+    test: list[Trajectory],
+) -> CheckResult:
+    original_ids = {_task_key(t) for t in original}
+    split_ids = [_task_key(t) for t in train + val + test]
+    duplicate_count = len(split_ids) - len(set(split_ids))
+    missing = sorted(original_ids - set(split_ids))[:5]
+    extra = sorted(set(split_ids) - original_ids)[:5]
+    ok = not duplicate_count and not missing and not extra and len(split_ids) == len(original)
+    return CheckResult(
+        name="split conserves all trajectories without duplicates",
+        passed=ok,
+        detail=(
+            f"{len(split_ids)}/{len(original)} conserved"
+            if ok
+            else (
+                f"split={len(split_ids)}, original={len(original)}, "
+                f"duplicates={duplicate_count}, missing={missing}, extra={extra}"
+            )
+        ),
+    )
+
+
+def check_min_mixed_tasks(
+    data: list[Trajectory],
+    min_count: int,
+    split_name: str,
+) -> CheckResult:
+    mixed = _mixed_task_ids(data)
+    return CheckResult(
+        name=f"{split_name} has at least {min_count} mixed-outcome tasks",
+        passed=len(mixed) >= min_count,
+        detail=f"{len(mixed)} mixed tasks",
+    )
+
+
+def run_split_checks(
+    original: list[Trajectory],
+    train: list[Trajectory],
+    val: list[Trajectory],
+    test: list[Trajectory],
+    *,
+    rollouts_per_task: int,
+    min_val_mixed_tasks: int,
+    min_test_mixed_tasks: int,
+) -> list[CheckResult]:
+    return [
+        check_rollout_completeness(original, rollouts_per_task=rollouts_per_task),
+        check_no_task_overlap(train, val, test),
+        check_conservation(original, train, val, test),
+        check_min_mixed_tasks(val, min_val_mixed_tasks, "val"),
+        check_min_mixed_tasks(test, min_test_mixed_tasks, "test"),
+    ]
+
+
+def _split_summary(data: list[Trajectory]) -> dict[str, object]:
+    task_ids = _task_ids(data)
+    n_pass = sum(t.outcome for t in data)
+    return {
+        "n_tasks": len(task_ids),
+        "n_trajectories": len(data),
+        "n_pass": n_pass,
+        "pass_rate": round(n_pass / len(data), 4) if data else 0.0,
+        "n_mixed_tasks": len(_mixed_task_ids(data)),
+        "mixed_task_ids": _mixed_task_ids(data),
+        "pass_count_histogram": _pass_count_histogram(data),
+    }
+
+
+def _check_results_for_manifest(checks: list[CheckResult]) -> list[dict[str, object]]:
+    return [
+        {"name": check.name, "passed": check.passed, "detail": check.detail}
+        for check in checks
+    ]
+
+
+def build_split_manifest(
+    train: list[Trajectory],
+    val: list[Trajectory],
+    test: list[Trajectory],
+    *,
+    seed: int,
+    mixed_alloc: tuple[int, int, int],
+    nonmixed_fracs: tuple[float, float, float],
+    input_dirs: list[str],
+    checks: list[CheckResult],
+) -> dict[str, object]:
+    all_data = train + val + test
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "strategy": "task_grouped_stratified",
+        "seed": seed,
+        "mixed_alloc": list(mixed_alloc),
+        "nonmixed_fracs": list(nonmixed_fracs),
+        "input_dirs": input_dirs,
+        "checks": _check_results_for_manifest(checks),
+        "totals": {
+            "n_tasks": len(_task_ids(all_data)),
+            "n_trajectories": len(all_data),
+            "n_mixed_tasks": len(_mixed_task_ids(all_data)),
+        },
+        "splits": {
+            "train": _split_summary(train),
+            "val": _split_summary(val),
+            "test": _split_summary(test),
+        },
+    }
+
+
 
 
 def check_task_prompt_coverage(
@@ -318,26 +617,60 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--output_dir",
         type=Path,
-        default=Path("data/code-trajectory-2.4k"),
+        default=Path("data/code-trajectory-2.4k-tasksplit"),
+    )
+    p.add_argument(
+        "--split_mode",
+        choices=("task_grouped", "trajectory"),
+        default="task_grouped",
+        help="task_grouped is leakage-safe. trajectory is legacy/debug only.",
     )
     p.add_argument("--val_frac", type=float, default=0.10)
     p.add_argument("--test_frac", type=float, default=0.10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--expected_rollouts_per_task", type=int, default=4)
+    p.add_argument(
+        "--mixed_alloc",
+        nargs=3,
+        type=int,
+        metavar=("TRAIN", "VAL", "TEST"),
+        default=(18, 4, 6),
+        help="Mixed-outcome task allocation for task_grouped split",
+    )
+    p.add_argument(
+        "--nonmixed_fracs",
+        nargs=3,
+        type=float,
+        metavar=("TRAIN", "VAL", "TEST"),
+        default=(0.8, 0.1, 0.1),
+        help="Per-pass-count-bucket fractions for non-mixed tasks",
+    )
     p.add_argument(
         "--skip_checks", action="store_true",
         help="Skip Phase 1 exit-criteria checks. Use ONLY for debugging or "
-             "for low-coverage pilots where you know the data isn't final.",
+        "for low-coverage pilots where you know the data isn't final.",
     )
     p.add_argument(
         "--allow_skipped_in_manifest", action="store_true",
         help="Allow manifest.skipped_files to be non-empty (still reports it). "
-             "Default behavior is to FAIL if label_all skipped any input file.",
+        "Default behavior is to FAIL if label_all skipped any input file.",
     )
     return p
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    default_tasksplit_dir = Path("data/code-trajectory-2.4k-tasksplit")
+    if args.split_mode == "trajectory" and args.output_dir == default_tasksplit_dir:
+        raise SystemExit(
+            "--split_mode trajectory is legacy/debug-only and must not write "
+            "to the task-grouped output directory. Pass --output_dir to an "
+            "explicit debug path."
+        )
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
+    validate_args(args)
 
     print(f"Reading from: {[str(d) for d in args.input_dirs]}")
     all_trajs = collect_all(args.input_dirs)
@@ -346,6 +679,8 @@ def main() -> None:
     if not all_trajs:
         print("ERROR: no trajectories found. Did labeling run?")
         sys.exit(1)
+
+    split_results: list[CheckResult] = []
 
     if not args.skip_checks:
         print("\nInspecting labeling manifests...")
@@ -373,12 +708,54 @@ def main() -> None:
     else:
         print("[!] --skip_checks set; not validating exit criteria.\n")
 
-    train, val, test = split(all_trajs, args.val_frac, args.test_frac, args.seed)
+    if args.split_mode == "trajectory":
+        print("[!] Using legacy trajectory-level split; not valid for final Phase 2/3.")
+        train, val, test = split(all_trajs, args.val_frac, args.test_frac, args.seed)
+    else:
+        mixed_alloc = tuple(args.mixed_alloc)
+        nonmixed_fracs = tuple(args.nonmixed_fracs)
+        train, val, test = split_by_task(
+            all_trajs,
+            mixed_alloc=mixed_alloc,
+            nonmixed_fracs=nonmixed_fracs,
+            seed=args.seed,
+        )
+
+        print("\nRunning task-grouped split checks...")
+        split_results = run_split_checks(
+            all_trajs,
+            train,
+            val,
+            test,
+            rollouts_per_task=args.expected_rollouts_per_task,
+            min_val_mixed_tasks=mixed_alloc[1],
+            min_test_mixed_tasks=mixed_alloc[2],
+        )
+        for r in split_results:
+            mark = "PASS" if r.passed else "FAIL"
+            print(f"  [{mark}] {r.name}: {r.detail}")
+        if any(not r.passed for r in split_results):
+            print("\n[FATAL] Task-grouped split checks failed.\n")
+            sys.exit(2)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_trajectories(args.output_dir / "train.jsonl", train)
     write_trajectories(args.output_dir / "val.jsonl", val)
     write_trajectories(args.output_dir / "test.jsonl", test)
+    if args.split_mode == "task_grouped":
+        manifest = build_split_manifest(
+            train,
+            val,
+            test,
+            seed=args.seed,
+            mixed_alloc=tuple(args.mixed_alloc),
+            nonmixed_fracs=tuple(args.nonmixed_fracs),
+            input_dirs=[str(d) for d in args.input_dirs],
+            checks=split_results,
+        )
+        (args.output_dir / "split_manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
 
     print(f"\nWrote splits to {args.output_dir}/")
     print(f"  train.jsonl  ({len(train)})")

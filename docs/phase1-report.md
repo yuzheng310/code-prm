@@ -1,14 +1,22 @@
 # Code-PRM Phase 1 Report
 
-## Status: COMPLETE
+## Status: RAW/LABELED COMPLETE; ORIGINAL SPLIT OBSOLETE
+
+The raw and labeled Phase 1 data pool is complete. The original assembled split at
+`data/code-trajectory-2.4k/` used trajectory-level random splitting and has
+task-level leakage, so it is obsolete for Phase 2/3. The valid Phase 2/3 input has
+been regenerated from the labeled source with the task-grouped assembly script into
+`data/code-trajectory-2.4k-tasksplit/` (seed=42, mixed_alloc=18/4/6) and
+independently verified: zero task overlap, complete rollouts, 592 conserved.
 
 ## Deliverables
-- Trajectory dataset: `data/code-trajectory-2.4k/{train,val,test}.jsonl`
+- Task-grouped trajectory dataset: `data/code-trajectory-2.4k-tasksplit/{train,val,test}.jsonl`
 - Total trajectories: 592
 - Raw trajectories: `data/raw/bigcodebench-hard/`
 - Labeled trajectories: `data/labeled/bigcodebench-hard/`
 - Labeling manifest: `data/labeled/bigcodebench-hard/labeling_manifest.json`
 - Quality report: `docs/phase1-quality/report.md`
+- Split manifest: `data/code-trajectory-2.4k-tasksplit/split_manifest.json` (records seed, strategy, input dirs, per-split stats, pass-count histograms, mixed task ids, and all hard-check results)
 - Figures:
   - `docs/phase1-quality/01_outcome_distribution.svg`
   - `docs/phase1-quality/02_pass_count_per_task.svg`
@@ -19,19 +27,34 @@
   - `docs/phase1-quality/07_label_method_breakdown.svg`
 
 ## Verification
-- Pytest: all tests passed on the lab box.
+- Pytest/lint: `uv run pytest tests/ -q` → 166 passed; `uv run --with ruff ruff check ...` → All checks passed.
 - Raw audit: PASS (`scripts/08_audit_pilot.py --dir data/raw/bigcodebench-hard --expected-count 592 --expected-rollouts-per-task 4`)
 - Labeled audit: PASS (`scripts/09_audit_labeled_pilot.py --dir data/labeled/bigcodebench-hard --expected-count 592 --expected-rollouts-per-task 4`)
-- Quality report: GO (`scripts/12_report_phase1_quality.py`)
-- Assembly checks: PASS (`scripts/30_assemble_dataset.py`)
+- Quality report: GO for raw/labeled structure (`scripts/12_report_phase1_quality.py`)
+- Original assembly checks: PASS structurally, but the original trajectory-level split is obsolete due to task leakage.
+- Task-grouped assembly: implemented in `scripts/30_assemble_dataset.py` and run locally from `data/labeled/bigcodebench-hard` to generate `data/code-trajectory-2.4k-tasksplit/`; split-level hard checks all PASS and are recorded in `split_manifest.json`.
 
-## Dataset Statistics
+## Original Split Statistics (Obsolete)
 | Split | Trajectories | Steps | Pass rate | Avg steps / traj |
 |---|---:|---:|---:|---:|
 | train | 474 | 2070 | 29.96% | 4.37 |
 | val | 59 | 231 | 25.42% | 3.92 |
 | test | 59 | 239 | 33.90% | 4.05 |
 | total | 592 | 2540 | 29.90% | 4.29 |
+
+These files are not valid held-out splits because every val/test task also appears in train through another rollout.
+
+## Task-Grouped Split Statistics
+Default task-grouped assembly keeps all 4 rollouts of a task in one split and allocates mixed-outcome tasks as `train/val/test = 18/4/6`.
+
+| Split | Tasks | Trajectories | Steps | Pass rate | Mixed tasks | Pass-count histogram |
+|---|---:|---:|---:|---:|---:|---|
+| train | 113 | 452 | 1825 | 28.98% | 18 | `0/4:71, 1/4:6, 2/4:7, 3/4:5, 4/4:24` |
+| val | 15 | 60 | 320 | 31.67% | 4 | `0/4:8, 1/4:2, 2/4:1, 3/4:1, 4/4:3` |
+| test | 20 | 80 | 395 | 33.75% | 6 | `0/4:10, 1/4:2, 2/4:3, 3/4:1, 4/4:4` |
+| total | 148 | 592 | 2540 | 29.90% | 28 | `0/4:89, 1/4:10, 2/4:11, 3/4:7, 4/4:31` |
+
+Task-grouped split checks passed: no task overlap, every task has rollout ids `[0,1,2,3]`, and all 592 `(task_id, rollout_id)` pairs are conserved. The BoN test set is intentionally documented as underpowered: 6 mixed tasks can show a direction, not a strong statistical conclusion.
 
 ## Raw Collection Quality
 - Tasks: 148
@@ -76,20 +99,24 @@
 - The relay/dashboard billing record should be treated as the source of truth for final LLM-judge labeling cost.
 
 ## Interpretation
-- The raw dataset is structurally complete: 148 tasks × 4 rollouts = 592 trajectories.
-- The raw pass rate (29.9%) is neither too low nor too high, leaving enough successful and failed trajectories for downstream ranking and PRM learning.
-- There are 28 mixed-outcome tasks, which gives meaningful Best-of-N / trajectory-ranking signal.
-- The average trajectory has 4.29 tool steps, so this is not merely one-shot solution data; it contains enough multi-step behavior to justify step-level supervision.
+- The raw/labeled data pool is structurally complete: 148 tasks × 4 rollouts = 592 trajectories.
+- The raw pass rate (29.9%) is neither too low nor too high, leaving enough successful and failed trajectories for exploratory PRM learning.
+- The original trajectory-level split is invalid for Phase 2/3 because it leaks task identities across train/val/test.
+- The task-grouped split fixes leakage and makes held-out BoN constructible, but the held-out BoN sample remains small under the default 6 mixed test tasks.
+- The average trajectory has 4.29 tool steps, so this is not merely one-shot solution data; it contains enough multi-step behavior to test a training pipeline.
 - The success-path judge labels are conservative but not degenerate: all five `step_label` buckets appear, and 250 / 673 success-path tool steps score at least 0.5.
 
 ## Known Limitations
 - Phase 1 labels are LLM-judge surrogate labels, not real Monte Carlo rollout labels.
 - `outcome=0` trajectories use outcome-only simplification (`step_label = 0` on tool steps).
+- 84.8% of all tool-step labels are 0; Phase 2 must report zero-predictor and outcome-only ORM baselines, plus success-path / `llm_judge`-only metrics.
 - Phase 1 uses BigCodeBench-Hard only; SWE-bench remains future work.
 - Full labeling cost is not reconstructible from the final manifest alone because the run was resumed after interruption.
+- Held-out BoN under the default split has only 6 mixed-outcome test tasks; conclusions are exploratory/qualitative, not definitive.
 
 ## Final Artifacts
 - Raw: `data/raw/bigcodebench-hard/`
 - Labeled: `data/labeled/bigcodebench-hard/`
-- Final dataset: `data/code-trajectory-2.4k/`
+- Obsolete trajectory-level split: `data/code-trajectory-2.4k/`
+- Valid task-grouped split: `data/code-trajectory-2.4k-tasksplit/`
 - Quality report: `docs/phase1-quality/`

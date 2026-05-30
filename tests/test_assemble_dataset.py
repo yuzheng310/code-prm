@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+import pytest
 
 from src.labeler.trajectory_schema import Step, Trajectory
 
@@ -290,6 +291,17 @@ def test_inspect_manifests_fails_when_output_missing(tmp_path: Path) -> None:
     assert any(not r.passed and "missing" in r.detail.lower() for r in results)
 
 
+def test_inspect_manifests_accepts_relocated_output_by_basename(tmp_path: Path) -> None:
+    out_file = tmp_path / "a.jsonl"
+    out_file.write_text("{}\n")
+    _write_manifest(
+        tmp_path,
+        processed_outputs=[Path("/root/code-prm/data/labeled/bigcodebench-hard/a.jsonl")],
+    )
+    results = assemble.inspect_manifests([tmp_path])
+    assert all(r.passed for r in results), [r.detail for r in results]
+
+
 def test_inspect_manifests_fails_when_skipped_files_present(tmp_path: Path) -> None:
     out_file = tmp_path / "a.jsonl"
     out_file.write_text("{}\n")
@@ -317,9 +329,18 @@ def test_inspect_manifests_allows_skipped_with_flag(tmp_path: Path) -> None:
     # All checks should pass under the override
     assert all(r.passed for r in results), [r.detail for r in results]
 
-def test_arg_parser_defaults_to_bigcodebench_only() -> None:
+def test_arg_parser_defaults_to_bigcodebench_task_grouped_split() -> None:
     parser = assemble.build_arg_parser()
     args = parser.parse_args([])
 
     assert args.input_dirs == [Path("data/labeled/bigcodebench-hard")]
-    assert args.output_dir == Path("data/code-trajectory-2.4k")
+    assert args.output_dir == Path("data/code-trajectory-2.4k-tasksplit")
+    assert args.split_mode == "task_grouped"
+
+
+def test_validate_args_rejects_trajectory_mode_with_default_tasksplit_output() -> None:
+    parser = assemble.build_arg_parser()
+    args = parser.parse_args(["--split_mode", "trajectory"])
+
+    with pytest.raises(SystemExit):
+        assemble.validate_args(args)
