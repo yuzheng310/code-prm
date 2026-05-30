@@ -306,16 +306,13 @@ def run_all_checks(trajectories: list[Trajectory]) -> list[CheckResult]:
 # --- main ---
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--input_dirs",
         nargs="+",
         type=Path,
-        default=[
-            Path("data/labeled/swebench-lite"),
-            Path("data/labeled/bigcodebench-hard"),
-        ],
+        default=[Path("data/labeled/bigcodebench-hard")],
         help="Directories containing labeled *.jsonl files",
     )
     p.add_argument(
@@ -336,7 +333,11 @@ def main() -> None:
         help="Allow manifest.skipped_files to be non-empty (still reports it). "
              "Default behavior is to FAIL if label_all skipped any input file.",
     )
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
 
     print(f"Reading from: {[str(d) for d in args.input_dirs]}")
     all_trajs = collect_all(args.input_dirs)

@@ -316,3 +316,10 @@ def test_inspect_manifests_allows_skipped_with_flag(tmp_path: Path) -> None:
     results = assemble.inspect_manifests([tmp_path], allow_skipped=True)
     # All checks should pass under the override
     assert all(r.passed for r in results), [r.detail for r in results]
+
+def test_arg_parser_defaults_to_bigcodebench_only() -> None:
+    parser = assemble.build_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.input_dirs == [Path("data/labeled/bigcodebench-hard")]
+    assert args.output_dir == Path("data/code-trajectory-2.4k")
