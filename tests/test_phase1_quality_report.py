@@ -148,3 +148,20 @@ def test_phase1_quality_report_marks_extreme_pass_rate_as_stop(tmp_path: Path) -
     assert any("pass_rate" in reason for reason in summary["decision"]["reasons"])
     assert (out_dir / "01_outcome_distribution.svg").exists()
     assert not (out_dir / "06_success_step_label_distribution.svg").exists()
+
+def test_phase1_quality_report_stops_when_labeled_dir_requested_but_empty(tmp_path: Path) -> None:
+    raw_records = [_record("task-0", 0, outcome=1, tools=["write"])]
+    raw_dir = tmp_path / "raw"
+    labeled_dir = tmp_path / "labeled"
+    out_dir = tmp_path / "quality"
+    _write_jsonl(raw_dir / "bigcodebench-hard_20260529.jsonl", raw_records)
+    labeled_dir.mkdir()
+
+    summary = report.generate_report(raw_dir=raw_dir, labeled_dir=labeled_dir, out_dir=out_dir)
+
+    assert summary["decision"]["status"] == "STOP"
+    assert any(
+        "labeled_dir was provided but contained 0 trajectories" in reason
+        for reason in summary["decision"]["reasons"]
+    )
+    assert summary["labeled"]["n_trajectories"] == 0

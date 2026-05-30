@@ -167,7 +167,12 @@ def _histogram(values: list[float], bins: int) -> dict[str, int]:
     return dict(counts)
 
 
-def _decision(raw_summary: dict[str, Any], labeled_summary: dict[str, Any] | None) -> dict[str, Any]:
+def _decision(
+    raw_summary: dict[str, Any],
+    labeled_summary: dict[str, Any] | None,
+    *,
+    labeled_dir_requested: bool = False,
+) -> dict[str, Any]:
     reasons: list[str] = []
     cautions: list[str] = []
     pass_rate = raw_summary["pass_rate"] or 0.0
@@ -185,6 +190,8 @@ def _decision(raw_summary: dict[str, Any], labeled_summary: dict[str, Any] | Non
         cautions.append(f"mixed_outcome_task_count={mixed} < 20")
     if mean_steps < 2.0:
         cautions.append(f"tool_steps_mean={mean_steps:.2f} < 2")
+    if labeled_dir_requested and (labeled_summary is None or labeled_summary["n_trajectories"] == 0):
+        reasons.append("labeled_dir was provided but contained 0 trajectories")
     if labeled_summary:
         if labeled_summary["bad_outcome_zero_label_count"]:
             reasons.append("outcome=0 trajectories contain non-zero labels")
@@ -306,8 +313,13 @@ def generate_report(raw_dir: Path, labeled_dir: Path | None, out_dir: Path) -> d
         old.unlink()
 
     raw_summary = _raw_summary(raw)
-    labeled_summary = _labeled_summary(labeled) if labeled else None
-    decision = _decision(raw_summary, labeled_summary)
+    labeled_dir_requested = labeled_dir is not None
+    labeled_summary = _labeled_summary(labeled) if labeled_dir_requested else None
+    decision = _decision(
+        raw_summary,
+        labeled_summary,
+        labeled_dir_requested=labeled_dir_requested,
+    )
     summary: dict[str, Any] = {"raw": raw_summary, "decision": decision}
     if labeled_summary is not None:
         summary["labeled"] = labeled_summary
