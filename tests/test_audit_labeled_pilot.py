@@ -37,6 +37,8 @@ def _step(step: int, tool: str | None, label: float | None) -> dict:
 def _record(
     task_id: str,
     *,
+    run_id: str | None = None,
+    rollout_id: int = 0,
     outcome: int,
     method: str,
     labels: list[float | None],
@@ -44,8 +46,8 @@ def _record(
     return {
         "task_id": task_id,
         "task_type": "bigcodebench-hard",
-        "run_id": f"run-{task_id}",
-        "rollout_id": 0,
+        "run_id": run_id or f"run-{task_id}-{rollout_id}",
+        "rollout_id": rollout_id,
         "task_prompt": "Implement function.",
         "task_metadata": {"entry_point": "solve"},
         "trajectory": [_step(0, None, None)] + [_step(i + 1, "write", label) for i, label in enumerate(labels)],
@@ -113,6 +115,45 @@ def test_audit_passes_clean_labeled_pilot(tmp_path: Path) -> None:
     assert result.summary["bad_outcome_zero_labels"] == []
     assert result.summary["success_label_values"] == {0.0: 1, 0.25: 1, 0.5: 1, 0.75: 1, 1.0: 1}
 
+
+def test_audit_passes_full_multi_rollout_labeled_set(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "out.jsonl",
+        [
+            _record("task-a", rollout_id=0, outcome=1, method="llm_judge", labels=[0.25]),
+            _record("task-a", rollout_id=1, outcome=0, method="outcome_zero_simplification", labels=[0.0]),
+            _record("task-b", rollout_id=0, outcome=1, method="llm_judge", labels=[0.5]),
+            _record("task-b", rollout_id=1, outcome=1, method="llm_judge", labels=[1.0]),
+        ],
+    )
+    _write_manifest(tmp_path / "labeling_manifest.json")
+
+    result = audit.audit_dir(
+        tmp_path,
+        expected_count=4,
+        expected_rollouts_per_task=2,
+        min_distinct_success_labels=2,
+    )
+
+    assert result.ok
+    assert result.summary["unique_task_ids"] == 2
+    assert result.summary["rollouts_per_task"] == {"task-a": [0, 1], "task-b": [0, 1]}
+
+
+def test_audit_fails_full_multi_rollout_labeled_set_with_missing_rollout(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "out.jsonl",
+        [
+            _record("task-a", rollout_id=0, outcome=1, method="llm_judge", labels=[0.25]),
+            _record("task-a", rollout_id=0, run_id="run-task-a-other", outcome=0, method="outcome_zero_simplification", labels=[0.0]),
+        ],
+    )
+    _write_manifest(tmp_path / "labeling_manifest.json")
+
+    result = audit.audit_dir(tmp_path, expected_count=2, expected_rollouts_per_task=2)
+
+    assert not result.ok
+    assert any("expected rollout ids [0, 1], got [0]" in error for error in result.errors)
 
 def test_audit_fails_missing_manifest(tmp_path: Path) -> None:
     _write_jsonl(tmp_path / "out.jsonl", [_record("pass", outcome=1, method="llm_judge", labels=[0.5])])

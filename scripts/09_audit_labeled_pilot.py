@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Audit labeled BigCodeBench pilot trajectories before full collection.
-
-The raw pilot audit proves the grader is credible. This script proves the
-labeler output preserves that contract and has useful step-label signal.
-"""
+"""Audit labeled BigCodeBench trajectories before dataset assembly."""
 from __future__ import annotations
 
 import argparse
@@ -79,10 +75,12 @@ def _read_manifest(manifest_path: Path) -> tuple[dict[str, Any] | None, list[str
         return None, [f"invalid labeling_manifest.json: {exc}"], warnings
     if not isinstance(raw, dict):
         return None, ["labeling_manifest.json is not an object"], warnings
-    if raw.get("tool") != "src.labeler.label_all":
-        warnings.append(f"manifest tool is {raw.get('tool')!r}, expected 'src.labeler.label_all'")
+    if raw.get("tool") not in {"src.labeler.label_all", "scripts.21_resume_label_file"}:
+        warnings.append(
+            f"manifest tool is {raw.get('tool')!r}, expected label_all or resume_label_file"
+        )
     if raw.get("K") != 4:
-        warnings.append(f"manifest K is {raw.get('K')!r}, expected pilot K=4")
+        warnings.append(f"manifest K is {raw.get('K')!r}, expected pilot/full K=4")
     if raw.get("skipped_files"):
         errors.append(f"manifest has skipped_files: {raw.get('skipped_files')}")
     if not raw.get("processed_files"):
@@ -98,6 +96,7 @@ def audit_dir(
     input_dir: Path,
     *,
     expected_count: int = 10,
+    expected_rollouts_per_task: int = 1,
     min_distinct_success_labels: int = 2,
 ) -> AuditResult:
     files = sorted(input_dir.glob("*.jsonl"))
@@ -117,6 +116,7 @@ def audit_dir(
     rows: list[RowEvidence] = []
     task_ids: list[str] = []
     run_ids: list[str | None] = []
+    rollout_ids: list[int] = []
     outcomes: list[int] = []
     methods: list[str | None] = []
     all_tool_labels: list[float] = []
@@ -132,6 +132,7 @@ def audit_dir(
         task_id = str(raw.get("task_id", "<missing>"))
         task_ids.append(task_id)
         run_ids.append(raw.get("run_id"))
+        rollout_ids.append(int(raw.get("rollout_id", 0)))
         try:
             traj = Trajectory(**raw)
         except ValidationError as exc:
@@ -191,13 +192,29 @@ def audit_dir(
                 "expected 'llm_judge'"
             )
 
-    duplicate_task_ids = sorted(task_id for task_id, count in Counter(task_ids).items() if count > 1)
-    if duplicate_task_ids:
-        errors.append(f"Duplicate task_id values: {duplicate_task_ids}")
+    task_to_rollouts: dict[str, set[int]] = {}
+    for task_id, rollout_id in zip(task_ids, rollout_ids):
+        task_to_rollouts.setdefault(task_id, set()).add(rollout_id)
+    expected_rollout_ids = list(range(expected_rollouts_per_task))
+    rollouts_per_task = {task_id: sorted(ids) for task_id, ids in sorted(task_to_rollouts.items())}
+    for task_id, ids in rollouts_per_task.items():
+        if ids != expected_rollout_ids:
+            errors.append(f"task_id {task_id}: expected rollout ids {expected_rollout_ids}, got {ids}")
+
+    task_counts = Counter(task_ids)
+    bad_task_counts = sorted(
+        (task_id, count) for task_id, count in task_counts.items() if count != expected_rollouts_per_task
+    )
+    if bad_task_counts:
+        errors.append(
+            f"Task trajectory counts do not match expected_rollouts_per_task="
+            f"{expected_rollouts_per_task}: {bad_task_counts[:20]}"
+        )
+
     nonempty_run_ids = [run_id for run_id in run_ids if run_id]
     duplicate_run_ids = sorted(run_id for run_id, count in Counter(nonempty_run_ids).items() if count > 1)
     if duplicate_run_ids:
-        errors.append(f"Duplicate run_id values: {duplicate_run_ids}")
+        errors.append(f"Duplicate run_id values: {duplicate_run_ids[:20]}")
 
     if bad_outcome_zero_labels:
         errors.append(f"outcome=0 has non-zero tool step labels: {bad_outcome_zero_labels[:20]}")
@@ -212,7 +229,7 @@ def audit_dir(
     if outcomes and 1 not in outcomes:
         errors.append("No outcome=1 trajectories; pilot cannot exercise llm_judge path")
     if outcomes and 0 not in outcomes:
-        warnings.append("No outcome=0 trajectories; pilot did not exercise simplification path")
+        warnings.append("No outcome=0 trajectories; run did not exercise simplification path")
 
     success_mean = statistics.mean(success_tool_labels) if success_tool_labels else None
     success_median = statistics.median(success_tool_labels) if success_tool_labels else None
@@ -236,6 +253,8 @@ def audit_dir(
         "success_label_median": round(success_median, 4) if success_median is not None else None,
         "bad_outcome_zero_labels": bad_outcome_zero_labels,
         "run_ids_unique": len(set(nonempty_run_ids)),
+        "unique_task_ids": len(task_counts),
+        "rollouts_per_task": rollouts_per_task,
     }
     return AuditResult(
         input_dir=input_dir,
@@ -274,27 +293,33 @@ def render_report(result: AuditResult) -> str:
     for row in result.rows:
         lines.append(
             f"  {row.task_id} outcome={row.outcome} method={row.label_method} "
-            f"labels={row.labels} "
-            f"labeled_tool_steps={row.n_labeled_tool_steps}/{row.n_tool_steps}"
+            f"labels={row.labels} labeled_tool_steps={row.n_labeled_tool_steps}/{row.n_tool_steps}"
         )
     return "\n".join(lines)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dir", type=Path, default=Path("data/labeled/pilot"), help="Labeled pilot output directory")
+    parser.add_argument("--dir", type=Path, default=Path("data/labeled/pilot"), help="Labeled output directory")
     parser.add_argument("--expected-count", type=int, default=10, help="Expected labeled trajectory count")
+    parser.add_argument(
+        "--expected-rollouts-per-task",
+        type=int,
+        default=1,
+        help="Expected rollout ids per task: 1 for pilot, 4 for full collection",
+    )
     parser.add_argument(
         "--min-distinct-success-labels",
         type=int,
         default=2,
-        help="Minimum distinct step_label values among outcome=1 tool steps",
+        help="Minimum distinct success-path step_label values",
     )
     args = parser.parse_args()
 
     result = audit_dir(
         args.dir,
         expected_count=args.expected_count,
+        expected_rollouts_per_task=args.expected_rollouts_per_task,
         min_distinct_success_labels=args.min_distinct_success_labels,
     )
     print(render_report(result))
